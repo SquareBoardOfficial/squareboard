@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Plus, Trophy, Trash2, Shuffle, ChevronLeft, DollarSign, Calendar, Users, Check, MessageCircle, Send } from 'lucide-react';
+import { supabase } from './supabase';
 
 export default function SquareBoard() {
   const [boards, setBoards] = useState([]);
@@ -32,18 +33,87 @@ export default function SquareBoard() {
   const [commentText, setCommentText] = useState('');
   const [commentTeam, setCommentTeam] = useState('none'); // 'home', 'away', 'none'
 
-  // Load boards from storage on mount
+  // Load boards from Supabase on mount
   useEffect(() => {
-    try {
-      const saved = localStorage.getItem('boards');
-      if (saved) {
-        setBoards(JSON.parse(saved));
+    async function loadBoards() {
+      const { data, error } = await supabase
+        .from('boards')
+        .select('*')
+        .order('created_at', { ascending: false });
+
+      if (error) {
+        console.error('Failed to load boards from Supabase:', error);
+      } else {
+        // Convert database snake_case to camelCase for our React code
+        const camelBoards = (data || []).map(dbToBoard);
+        setBoards(camelBoards);
       }
-    } catch (err) {
-      // No saved boards yet, or invalid data
+      setLoaded(true);
     }
-    setLoaded(true);
+    loadBoards();
   }, []);
+
+  // Subscribe to realtime updates from Supabase.
+  // When ANY board changes in the database, update our local state.
+  useEffect(() => {
+    const channel = supabase
+      .channel('boards-changes')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'boards' },
+        (payload) => {
+          if (payload.eventType === 'INSERT') {
+            const newBoard = dbToBoard(payload.new);
+            setBoards((current) => {
+              // Don't add if we already have this board (e.g. we just created it ourselves)
+              if (current.some((b) => b.id === newBoard.id)) return current;
+              return [newBoard, ...current];
+            });
+          } else if (payload.eventType === 'UPDATE') {
+            const updatedBoard = dbToBoard(payload.new);
+            setBoards((current) =>
+              current.map((b) => (b.id === updatedBoard.id ? updatedBoard : b))
+            );
+            // If this is the currently active board, update it too
+            setActiveBoard((current) =>
+              current && current.id === updatedBoard.id ? updatedBoard : current
+            );
+          } else if (payload.eventType === 'DELETE') {
+            const deletedId = payload.old.id;
+            setBoards((current) => current.filter((b) => b.id !== deletedId));
+            setActiveBoard((current) =>
+              current && current.id === deletedId ? null : current
+            );
+          }
+        }
+      )
+      .subscribe();
+
+    // Cleanup: when the component unmounts (rare, but matters), close the channel
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, []);
+
+  // Convert a database row (snake_case) to a board object (camelCase)
+  // that matches what the rest of our code expects.
+  function dbToBoard(row) {
+    return {
+      id: row.id,
+      homeTeam: row.home_team,
+      awayTeam: row.away_team,
+      gameDate: row.game_date,
+      buyIn: parseFloat(row.buy_in) || 0,
+      squares: row.squares || Array(100).fill(null),
+      rowNumbers: row.row_numbers,
+      colNumbers: row.col_numbers,
+      scores: row.scores || { q1: null, q2: null, q3: null, final: null },
+      winners: row.winners || { q1: null, q2: null, q3: null, final: null },
+      comments: row.comments || [],
+      lockedEarly: row.locked_early,
+      createdAt: row.created_at,
+    };
+  }
 
   // Save boards to storage whenever they change
   useEffect(() => {
@@ -55,22 +125,35 @@ export default function SquareBoard() {
     }
   }, [boards, loaded]);
 
-  function createBoard() {
+  async function createBoard() {
     if (!homeTeam.trim() || !awayTeam.trim()) return;
-    const newBoard = {
-      id: Date.now().toString(),
-      homeTeam: homeTeam.trim(),
-      awayTeam: awayTeam.trim(),
-      gameDate: gameDate,
-      buyIn: parseFloat(buyIn) || 0,
-      squares: Array(100).fill(null), // null = unclaimed, otherwise { name }
-      rowNumbers: null, // assigned when filled
-      colNumbers: null,
-      scores: { q1: null, q2: null, q3: null, final: null },
-      winners: { q1: null, q2: null, q3: null, final: null },
-      comments: [],
-      createdAt: Date.now(),
-    };
+
+    // Insert into Supabase. The database will generate the UUID and timestamps.
+    const { data, error } = await supabase
+      .from('boards')
+      .insert({
+        home_team: homeTeam.trim(),
+        away_team: awayTeam.trim(),
+        game_date: gameDate,
+        buy_in: parseFloat(buyIn) || 0,
+        squares: Array(100).fill(null),
+        // row_numbers, col_numbers stay null until drawn
+        scores: { q1: null, q2: null, q3: null, final: null },
+        winners: { q1: null, q2: null, q3: null, final: null },
+        comments: [],
+        locked_early: false,
+      })
+      .select()
+      .single();
+
+    if (error) {
+      console.error('Failed to create board:', error);
+      alert('Sorry, could not create the board. Please try again.');
+      return;
+    }
+
+    // Convert the returned row to our camelCase format and add to state
+    const newBoard = dbToBoard(data);
     setBoards([newBoard, ...boards]);
     setActiveBoard(newBoard);
     setHomeTeam('');
@@ -89,40 +172,60 @@ export default function SquareBoard() {
     }
   }
 
-  function updateActiveBoard(updates) {
+  async function updateActiveBoard(updates) {
     const updated = { ...activeBoard, ...updates };
     setActiveBoard(updated);
     setBoards(boards.map(b => b.id === updated.id ? updated : b));
+
+    const dbUpdates = {};
+    if ('homeTeam' in updates) dbUpdates.home_team = updates.homeTeam;
+    if ('awayTeam' in updates) dbUpdates.away_team = updates.awayTeam;
+    if ('gameDate' in updates) dbUpdates.game_date = updates.gameDate;
+    if ('buyIn' in updates) dbUpdates.buy_in = updates.buyIn;
+    if ('squares' in updates) dbUpdates.squares = updates.squares;
+    if ('rowNumbers' in updates) dbUpdates.row_numbers = updates.rowNumbers;
+    if ('colNumbers' in updates) dbUpdates.col_numbers = updates.colNumbers;
+    if ('scores' in updates) dbUpdates.scores = updates.scores;
+    if ('winners' in updates) dbUpdates.winners = updates.winners;
+    if ('comments' in updates) dbUpdates.comments = updates.comments;
+    if ('lockedEarly' in updates) dbUpdates.locked_early = updates.lockedEarly;
+    dbUpdates.updated_at = new Date().toISOString();
+
+    const { error } = await supabase
+      .from('boards')
+      .update(dbUpdates)
+      .eq('id', activeBoard.id);
+
+    if (error) {
+      console.error('Failed to update board:', error);
+    }
   }
 
   function claimSquare(index) {
     if (!claimName.trim()) return;
     const newSquares = [...activeBoard.squares];
     newSquares[index] = { name: claimName.trim() };
-    const updated = { ...activeBoard, squares: newSquares };
+
+    const changes = { squares: newSquares };
 
     // Auto-assign numbers if board just got filled
     const filledCount = newSquares.filter(s => s !== null).length;
-    if (filledCount === 100 && !updated.rowNumbers) {
-      updated.rowNumbers = shuffle([0,1,2,3,4,5,6,7,8,9]);
-      updated.colNumbers = shuffle([0,1,2,3,4,5,6,7,8,9]);
+    if (filledCount === 100 && !activeBoard.rowNumbers) {
+      changes.rowNumbers = shuffle([0,1,2,3,4,5,6,7,8,9]);
+      changes.colNumbers = shuffle([0,1,2,3,4,5,6,7,8,9]);
     }
 
-    setActiveBoard(updated);
-    setBoards(boards.map(b => b.id === updated.id ? updated : b));
+    updateActiveBoard(changes);
     setClaimingIndex(null);
     setClaimName('');
   }
 
   function drawNumbersEarly() {
-    const updated = {
-      ...activeBoard,
+    updateActiveBoard({
       rowNumbers: shuffle([0,1,2,3,4,5,6,7,8,9]),
       colNumbers: shuffle([0,1,2,3,4,5,6,7,8,9]),
       lockedEarly: true,
-    };
-    setActiveBoard(updated);
-    setBoards(boards.map(b => b.id === updated.id ? updated : b));
+    });
     setShowDrawConfirm(false);
   }
 
