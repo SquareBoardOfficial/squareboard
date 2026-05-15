@@ -1,11 +1,49 @@
 import React, { useState, useEffect } from 'react';
-import { Plus, Trophy, Trash2, Shuffle, ChevronLeft, DollarSign, Calendar, Users, Check, MessageCircle, Send } from 'lucide-react';
+import { Plus, Trophy, Trash2, Shuffle, ChevronLeft, DollarSign, Calendar, Users, Check, MessageCircle, Send, Copy } from 'lucide-react';
 import { supabase } from './supabase';
+
+// Read the current URL and figure out which view to show.
+// "/" or "" => home
+// "/create" => create
+// "/board/<id>" => board with that id
+function getViewFromUrl() {
+  const path = window.location.pathname;
+
+  if (path === '/' || path === '') {
+    return { view: 'home', boardId: null };
+  }
+  if (path === '/create') {
+    return { view: 'create', boardId: null };
+  }
+
+  const boardMatch = path.match(/^\/board\/([^/]+)/);
+  if (boardMatch) {
+    return { view: 'board', boardId: boardMatch[1] };
+  }
+
+  // Unknown path — fall back to home
+  return { view: 'home', boardId: null };
+}
+
+// Push a new URL into the browser's history.
+// Pass the view name and (for board view) the board ID.
+function pushUrl(view, boardId) {
+  let path = '/';
+  if (view === 'create') path = '/create';
+  else if (view === 'board' && boardId) path = `/board/${boardId}`;
+
+  // Only push if the URL is actually different to avoid spamming history.
+  if (window.location.pathname !== path) {
+    window.history.pushState({}, '', path);
+  }
+}
 
 export default function SquareBoard() {
   const [boards, setBoards] = useState([]);
   const [activeBoard, setActiveBoard] = useState(null);
-  const [view, setView] = useState('home'); // home, create, board
+  const initialUrl = getViewFromUrl();
+  const [view, setView] = useState(initialUrl.view); // home, create, board
+  const [pendingBoardId, setPendingBoardId] = useState(initialUrl.boardId);
   const [loaded, setLoaded] = useState(false);
 
   // Form state for creating a board
@@ -25,6 +63,7 @@ export default function SquareBoard() {
 
   // Confirmation modals
   const [showDrawConfirm, setShowDrawConfirm] = useState(false);
+  const [copied, setCopied] = useState(false);
 
   // Comments state
   const [commentName, setCommentName] = useState(() => {
@@ -47,6 +86,35 @@ export default function SquareBoard() {
         // Convert database snake_case to camelCase for our React code
         const camelBoards = (data || []).map(dbToBoard);
         setBoards(camelBoards);
+
+        // If the URL pointed to a specific board, set it as active
+        if (pendingBoardId) {
+          let matching = camelBoards.find((b) => b.id === pendingBoardId);
+
+          // If the board isn't in our list (link from a friend, etc.),
+          // fetch it directly from Supabase.
+          if (!matching) {
+            const { data: oneBoard, error: oneErr } = await supabase
+              .from('boards')
+              .select('*')
+              .eq('id', pendingBoardId)
+              .single();
+
+            if (oneErr) {
+              console.error('Failed to load specific board:', oneErr);
+              setView('home');
+            } else if (oneBoard) {
+              matching = dbToBoard(oneBoard);
+              setBoards((current) => [matching, ...current]);
+            }
+          }
+
+          if (matching) {
+            setActiveBoard(matching);
+          } else {
+            setView('home');
+          }
+        }
       }
       setLoaded(true);
     }
@@ -95,6 +163,32 @@ export default function SquareBoard() {
     };
   }, []);
 
+  // Keep the URL in sync with the current view.
+  useEffect(() => {
+    pushUrl(view, activeBoard?.id);
+  }, [view, activeBoard]);
+
+  // Listen for browser Back/Forward button presses
+  // and update the view to match the URL.
+  useEffect(() => {
+    function handlePopState() {
+      const next = getViewFromUrl();
+      setView(next.view);
+      if (next.view === 'board' && next.boardId) {
+        setBoards((current) => {
+          const found = current.find((b) => b.id === next.boardId);
+          if (found) setActiveBoard(found);
+          return current;
+        });
+      } else {
+        setActiveBoard(null);
+      }
+    }
+
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
+
   // Convert a database row (snake_case) to a board object (camelCase)
   // that matches what the rest of our code expects.
   function dbToBoard(row) {
@@ -115,15 +209,7 @@ export default function SquareBoard() {
     };
   }
 
-  // Save boards to storage whenever they change
-  useEffect(() => {
-    if (!loaded) return;
-    try {
-      localStorage.setItem('boards', JSON.stringify(boards));
-    } catch (err) {
-      console.error('Failed to save boards:', err);
-    }
-  }, [boards, loaded]);
+  
 
   async function createBoard() {
     if (!homeTeam.trim() || !awayTeam.trim()) return;
@@ -233,6 +319,19 @@ export default function SquareBoard() {
     const newSquares = [...activeBoard.squares];
     newSquares[index] = null;
     updateActiveBoard({ squares: newSquares });
+  }
+
+  async function copyShareLink() {
+    const url = window.location.href;
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch (err) {
+      console.error('Failed to copy:', err);
+      // Fallback: select the URL bar so the user can copy manually
+      alert('Could not copy automatically. The link is in the address bar.');
+    }
   }
 
   function shuffle(arr) {
@@ -409,7 +508,7 @@ export default function SquareBoard() {
           )}
 
           <div className="mt-12 text-center text-xs text-slate-600 pb-6">
-            All data stays on your device. Money is handled offline between players.
+            Boards sync live across devices. Money is handled offline between players.
           </div>
         </div>
       </div>
@@ -516,13 +615,23 @@ export default function SquareBoard() {
             >
               <ChevronLeft size={18} /> Back
             </button>
-            <button
-              onClick={() => deleteBoard(activeBoard.id)}
-              className="text-slate-500 hover:text-red-400 p-2"
-              title="Delete board"
-            >
-              <Trash2 size={16} />
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={copyShareLink}
+                className="flex items-center gap-1 text-xs sm:text-sm text-cyan-400 hover:text-cyan-300 px-3 py-1.5 rounded-lg bg-cyan-500/10 hover:bg-cyan-500/20 border border-cyan-500/30 transition"
+                title="Copy share link"
+              >
+                <Copy size={14} />
+                {copied ? 'Copied!' : 'Copy link'}
+              </button>
+              <button
+                onClick={() => deleteBoard(activeBoard.id)}
+                className="text-slate-500 hover:text-red-400 p-2"
+                title="Delete board"
+              >
+                <Trash2 size={16} />
+              </button>
+            </div>
           </div>
 
           <div className="text-center mb-6">
