@@ -1,10 +1,49 @@
 import React, { useState, useEffect } from 'react';
-import { Plus, Trophy, Trash2, Shuffle, ChevronLeft, DollarSign, Calendar, Users, Check, MessageCircle, Send } from 'lucide-react';
+import { Plus, Trophy, Trash2, Shuffle, ChevronLeft, DollarSign, Calendar, Users, Check, MessageCircle, Send, Copy } from 'lucide-react';
+import { supabase } from './supabase';
+
+// Read the current URL and figure out which view to show.
+// "/" or "" => home
+// "/create" => create
+// "/board/<id>" => board with that id
+function getViewFromUrl() {
+  const path = window.location.pathname;
+
+  if (path === '/' || path === '') {
+    return { view: 'home', boardId: null };
+  }
+  if (path === '/create') {
+    return { view: 'create', boardId: null };
+  }
+
+  const boardMatch = path.match(/^\/board\/([^/]+)/);
+  if (boardMatch) {
+    return { view: 'board', boardId: boardMatch[1] };
+  }
+
+  // Unknown path — fall back to home
+  return { view: 'home', boardId: null };
+}
+
+// Push a new URL into the browser's history.
+// Pass the view name and (for board view) the board ID.
+function pushUrl(view, boardId) {
+  let path = '/';
+  if (view === 'create') path = '/create';
+  else if (view === 'board' && boardId) path = `/board/${boardId}`;
+
+  // Only push if the URL is actually different to avoid spamming history.
+  if (window.location.pathname !== path) {
+    window.history.pushState({}, '', path);
+  }
+}
 
 export default function SquareBoard() {
   const [boards, setBoards] = useState([]);
   const [activeBoard, setActiveBoard] = useState(null);
-  const [view, setView] = useState('home'); // home, create, board
+  const initialUrl = getViewFromUrl();
+  const [view, setView] = useState(initialUrl.view); // home, create, board
+  const [pendingBoardId, setPendingBoardId] = useState(initialUrl.boardId);
   const [loaded, setLoaded] = useState(false);
 
   // Form state for creating a board
@@ -24,6 +63,7 @@ export default function SquareBoard() {
 
   // Confirmation modals
   const [showDrawConfirm, setShowDrawConfirm] = useState(false);
+  const [copied, setCopied] = useState(false);
 
   // Comments state
   const [commentName, setCommentName] = useState(() => {
@@ -32,45 +72,174 @@ export default function SquareBoard() {
   const [commentText, setCommentText] = useState('');
   const [commentTeam, setCommentTeam] = useState('none'); // 'home', 'away', 'none'
 
-  // Load boards from storage on mount
+  // Load boards from Supabase on mount
   useEffect(() => {
-    try {
-      const saved = localStorage.getItem('boards');
-      if (saved) {
-        setBoards(JSON.parse(saved));
+    async function loadBoards() {
+      const { data, error } = await supabase
+        .from('boards')
+        .select('*')
+        .order('created_at', { ascending: false });
+
+      if (error) {
+        console.error('Failed to load boards from Supabase:', error);
+      } else {
+        // Convert database snake_case to camelCase for our React code
+        const camelBoards = (data || []).map(dbToBoard);
+        setBoards(camelBoards);
+
+        // If the URL pointed to a specific board, set it as active
+        if (pendingBoardId) {
+          let matching = camelBoards.find((b) => b.id === pendingBoardId);
+
+          // If the board isn't in our list (link from a friend, etc.),
+          // fetch it directly from Supabase.
+          if (!matching) {
+            const { data: oneBoard, error: oneErr } = await supabase
+              .from('boards')
+              .select('*')
+              .eq('id', pendingBoardId)
+              .single();
+
+            if (oneErr) {
+              console.error('Failed to load specific board:', oneErr);
+              setView('home');
+            } else if (oneBoard) {
+              matching = dbToBoard(oneBoard);
+              setBoards((current) => [matching, ...current]);
+            }
+          }
+
+          if (matching) {
+            setActiveBoard(matching);
+          } else {
+            setView('home');
+          }
+        }
       }
-    } catch (err) {
-      // No saved boards yet, or invalid data
+      setLoaded(true);
     }
-    setLoaded(true);
+    loadBoards();
   }, []);
 
-  // Save boards to storage whenever they change
+  // Subscribe to realtime updates from Supabase.
+  // When ANY board changes in the database, update our local state.
   useEffect(() => {
-    if (!loaded) return;
-    try {
-      localStorage.setItem('boards', JSON.stringify(boards));
-    } catch (err) {
-      console.error('Failed to save boards:', err);
-    }
-  }, [boards, loaded]);
+    const channel = supabase
+      .channel('boards-changes')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'boards' },
+        (payload) => {
+          if (payload.eventType === 'INSERT') {
+            const newBoard = dbToBoard(payload.new);
+            setBoards((current) => {
+              // Don't add if we already have this board (e.g. we just created it ourselves)
+              if (current.some((b) => b.id === newBoard.id)) return current;
+              return [newBoard, ...current];
+            });
+          } else if (payload.eventType === 'UPDATE') {
+            const updatedBoard = dbToBoard(payload.new);
+            setBoards((current) =>
+              current.map((b) => (b.id === updatedBoard.id ? updatedBoard : b))
+            );
+            // If this is the currently active board, update it too
+            setActiveBoard((current) =>
+              current && current.id === updatedBoard.id ? updatedBoard : current
+            );
+          } else if (payload.eventType === 'DELETE') {
+            const deletedId = payload.old.id;
+            setBoards((current) => current.filter((b) => b.id !== deletedId));
+            setActiveBoard((current) =>
+              current && current.id === deletedId ? null : current
+            );
+          }
+        }
+      )
+      .subscribe();
 
-  function createBoard() {
-    if (!homeTeam.trim() || !awayTeam.trim()) return;
-    const newBoard = {
-      id: Date.now().toString(),
-      homeTeam: homeTeam.trim(),
-      awayTeam: awayTeam.trim(),
-      gameDate: gameDate,
-      buyIn: parseFloat(buyIn) || 0,
-      squares: Array(100).fill(null), // null = unclaimed, otherwise { name }
-      rowNumbers: null, // assigned when filled
-      colNumbers: null,
-      scores: { q1: null, q2: null, q3: null, final: null },
-      winners: { q1: null, q2: null, q3: null, final: null },
-      comments: [],
-      createdAt: Date.now(),
+    // Cleanup: when the component unmounts (rare, but matters), close the channel
+    return () => {
+      supabase.removeChannel(channel);
     };
+  }, []);
+
+  // Keep the URL in sync with the current view.
+  useEffect(() => {
+    pushUrl(view, activeBoard?.id);
+  }, [view, activeBoard]);
+
+  // Listen for browser Back/Forward button presses
+  // and update the view to match the URL.
+  useEffect(() => {
+    function handlePopState() {
+      const next = getViewFromUrl();
+      setView(next.view);
+      if (next.view === 'board' && next.boardId) {
+        setBoards((current) => {
+          const found = current.find((b) => b.id === next.boardId);
+          if (found) setActiveBoard(found);
+          return current;
+        });
+      } else {
+        setActiveBoard(null);
+      }
+    }
+
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
+
+  // Convert a database row (snake_case) to a board object (camelCase)
+  // that matches what the rest of our code expects.
+  function dbToBoard(row) {
+    return {
+      id: row.id,
+      homeTeam: row.home_team,
+      awayTeam: row.away_team,
+      gameDate: row.game_date,
+      buyIn: parseFloat(row.buy_in) || 0,
+      squares: row.squares || Array(100).fill(null),
+      rowNumbers: row.row_numbers,
+      colNumbers: row.col_numbers,
+      scores: row.scores || { q1: null, q2: null, q3: null, final: null },
+      winners: row.winners || { q1: null, q2: null, q3: null, final: null },
+      comments: row.comments || [],
+      lockedEarly: row.locked_early,
+      createdAt: row.created_at,
+    };
+  }
+
+  
+
+  async function createBoard() {
+    if (!homeTeam.trim() || !awayTeam.trim()) return;
+
+    // Insert into Supabase. The database will generate the UUID and timestamps.
+    const { data, error } = await supabase
+      .from('boards')
+      .insert({
+        home_team: homeTeam.trim(),
+        away_team: awayTeam.trim(),
+        game_date: gameDate,
+        buy_in: parseFloat(buyIn) || 0,
+        squares: Array(100).fill(null),
+        // row_numbers, col_numbers stay null until drawn
+        scores: { q1: null, q2: null, q3: null, final: null },
+        winners: { q1: null, q2: null, q3: null, final: null },
+        comments: [],
+        locked_early: false,
+      })
+      .select()
+      .single();
+
+    if (error) {
+      console.error('Failed to create board:', error);
+      alert('Sorry, could not create the board. Please try again.');
+      return;
+    }
+
+    // Convert the returned row to our camelCase format and add to state
+    const newBoard = dbToBoard(data);
     setBoards([newBoard, ...boards]);
     setActiveBoard(newBoard);
     setHomeTeam('');
@@ -89,40 +258,60 @@ export default function SquareBoard() {
     }
   }
 
-  function updateActiveBoard(updates) {
+  async function updateActiveBoard(updates) {
     const updated = { ...activeBoard, ...updates };
     setActiveBoard(updated);
     setBoards(boards.map(b => b.id === updated.id ? updated : b));
+
+    const dbUpdates = {};
+    if ('homeTeam' in updates) dbUpdates.home_team = updates.homeTeam;
+    if ('awayTeam' in updates) dbUpdates.away_team = updates.awayTeam;
+    if ('gameDate' in updates) dbUpdates.game_date = updates.gameDate;
+    if ('buyIn' in updates) dbUpdates.buy_in = updates.buyIn;
+    if ('squares' in updates) dbUpdates.squares = updates.squares;
+    if ('rowNumbers' in updates) dbUpdates.row_numbers = updates.rowNumbers;
+    if ('colNumbers' in updates) dbUpdates.col_numbers = updates.colNumbers;
+    if ('scores' in updates) dbUpdates.scores = updates.scores;
+    if ('winners' in updates) dbUpdates.winners = updates.winners;
+    if ('comments' in updates) dbUpdates.comments = updates.comments;
+    if ('lockedEarly' in updates) dbUpdates.locked_early = updates.lockedEarly;
+    dbUpdates.updated_at = new Date().toISOString();
+
+    const { error } = await supabase
+      .from('boards')
+      .update(dbUpdates)
+      .eq('id', activeBoard.id);
+
+    if (error) {
+      console.error('Failed to update board:', error);
+    }
   }
 
   function claimSquare(index) {
     if (!claimName.trim()) return;
     const newSquares = [...activeBoard.squares];
     newSquares[index] = { name: claimName.trim() };
-    const updated = { ...activeBoard, squares: newSquares };
+
+    const changes = { squares: newSquares };
 
     // Auto-assign numbers if board just got filled
     const filledCount = newSquares.filter(s => s !== null).length;
-    if (filledCount === 100 && !updated.rowNumbers) {
-      updated.rowNumbers = shuffle([0,1,2,3,4,5,6,7,8,9]);
-      updated.colNumbers = shuffle([0,1,2,3,4,5,6,7,8,9]);
+    if (filledCount === 100 && !activeBoard.rowNumbers) {
+      changes.rowNumbers = shuffle([0,1,2,3,4,5,6,7,8,9]);
+      changes.colNumbers = shuffle([0,1,2,3,4,5,6,7,8,9]);
     }
 
-    setActiveBoard(updated);
-    setBoards(boards.map(b => b.id === updated.id ? updated : b));
+    updateActiveBoard(changes);
     setClaimingIndex(null);
     setClaimName('');
   }
 
   function drawNumbersEarly() {
-    const updated = {
-      ...activeBoard,
+    updateActiveBoard({
       rowNumbers: shuffle([0,1,2,3,4,5,6,7,8,9]),
       colNumbers: shuffle([0,1,2,3,4,5,6,7,8,9]),
       lockedEarly: true,
-    };
-    setActiveBoard(updated);
-    setBoards(boards.map(b => b.id === updated.id ? updated : b));
+    });
     setShowDrawConfirm(false);
   }
 
@@ -130,6 +319,19 @@ export default function SquareBoard() {
     const newSquares = [...activeBoard.squares];
     newSquares[index] = null;
     updateActiveBoard({ squares: newSquares });
+  }
+
+  async function copyShareLink() {
+    const url = window.location.href;
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch (err) {
+      console.error('Failed to copy:', err);
+      // Fallback: select the URL bar so the user can copy manually
+      alert('Could not copy automatically. The link is in the address bar.');
+    }
   }
 
   function shuffle(arr) {
@@ -306,7 +508,7 @@ export default function SquareBoard() {
           )}
 
           <div className="mt-12 text-center text-xs text-slate-600 pb-6">
-            All data stays on your device. Money is handled offline between players.
+            Boards sync live across devices. Money is handled offline between players.
           </div>
         </div>
       </div>
@@ -413,13 +615,23 @@ export default function SquareBoard() {
             >
               <ChevronLeft size={18} /> Back
             </button>
-            <button
-              onClick={() => deleteBoard(activeBoard.id)}
-              className="text-slate-500 hover:text-red-400 p-2"
-              title="Delete board"
-            >
-              <Trash2 size={16} />
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={copyShareLink}
+                className="flex items-center gap-1 text-xs sm:text-sm text-cyan-400 hover:text-cyan-300 px-3 py-1.5 rounded-lg bg-cyan-500/10 hover:bg-cyan-500/20 border border-cyan-500/30 transition"
+                title="Copy share link"
+              >
+                <Copy size={14} />
+                {copied ? 'Copied!' : 'Copy link'}
+              </button>
+              <button
+                onClick={() => deleteBoard(activeBoard.id)}
+                className="text-slate-500 hover:text-red-400 p-2"
+                title="Delete board"
+              >
+                <Trash2 size={16} />
+              </button>
+            </div>
           </div>
 
           <div className="text-center mb-6">
