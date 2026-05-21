@@ -249,14 +249,25 @@ export default function SquareBoard() {
     setView('board');
   }
 
-  function deleteBoard(id) {
-    if (!confirm('Delete this board? This cannot be undone.')) return;
-    setBoards(boards.filter(b => b.id !== id));
-    if (activeBoard?.id === id) {
-      setActiveBoard(null);
-      setView('home');
-    }
+async function deleteBoard(id) {
+  if (!confirm('Delete this board? This cannot be undone.')) return;
+
+  const { error } = await supabase
+    .from('boards')
+    .delete()
+    .eq('id', id);
+
+  if (error) {
+    console.error('Failed to delete board:', error);
+    alert('Sorry, could not delete the board. Please try again.');
+    return;
   }
+
+  if (activeBoard?.id === id) {
+    setActiveBoard(null);
+    setView('home');
+  }
+}
 
   async function updateActiveBoard(updates) {
     const updated = { ...activeBoard, ...updates };
