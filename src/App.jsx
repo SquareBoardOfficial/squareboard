@@ -38,6 +38,38 @@ function pushUrl(view, boardId) {
   }
 }
 
+// Color palette for players. Each player who claims squares on a board
+// gets the next available color, assigned in order of first appearance.
+const PLAYER_COLORS = [
+  { bg: 'rgba(16, 185, 129, 0.35)', border: 'rgba(52, 211, 153, 0.7)' },   // emerald
+  { bg: 'rgba(59, 130, 246, 0.35)', border: 'rgba(96, 165, 250, 0.7)' },   // blue
+  { bg: 'rgba(236, 72, 153, 0.35)', border: 'rgba(244, 114, 182, 0.7)' },  // pink
+  { bg: 'rgba(168, 85, 247, 0.35)', border: 'rgba(192, 132, 252, 0.7)' },  // purple
+  { bg: 'rgba(249, 115, 22, 0.35)', border: 'rgba(251, 146, 60, 0.7)' },   // orange
+  { bg: 'rgba(234, 179, 8, 0.35)',  border: 'rgba(250, 204, 21, 0.7)' },   // yellow
+  { bg: 'rgba(20, 184, 166, 0.35)', border: 'rgba(45, 212, 191, 0.7)' },   // teal
+  { bg: 'rgba(239, 68, 68, 0.35)',  border: 'rgba(248, 113, 113, 0.7)' },  // red
+  { bg: 'rgba(132, 204, 22, 0.35)', border: 'rgba(163, 230, 53, 0.7)' },   // lime
+  { bg: 'rgba(99, 102, 241, 0.35)', border: 'rgba(129, 140, 248, 0.7)' },  // indigo
+];
+
+// Given a board's squares, work out which color a given name should use.
+// Names already on the board keep their color; a new name gets the next one.
+function getColorForName(squares, name) {
+  const seen = [];
+  for (const sq of squares) {
+    if (sq && sq.name) {
+      const lower = sq.name.toLowerCase();
+      if (!seen.includes(lower)) {
+        seen.push(lower);
+      }
+    }
+  }
+  let idx = seen.indexOf(name.toLowerCase());
+  if (idx === -1) idx = seen.length; // new name → next color
+  return PLAYER_COLORS[idx % PLAYER_COLORS.length];
+}
+
 export default function SquareBoard() {
   const [boards, setBoards] = useState([]);
   const [activeBoard, setActiveBoard] = useState(null);
@@ -290,7 +322,9 @@ export default function SquareBoard() {
   function claimSquare(index) {
     if (!claimName.trim()) return;
     const newSquares = [...activeBoard.squares];
-    newSquares[index] = { name: claimName.trim() };
+    const trimmedClaimName = claimName.trim();
+    const claimColor = getColorForName(newSquares, trimmedClaimName);
+    newSquares[index] = { name: trimmedClaimName, color: claimColor };
 
     const changes = { squares: newSquares };
 
@@ -819,11 +853,16 @@ export default function SquareBoard() {
                           }
                         }}
                         disabled={activeBoard.rowNumbers && !square}
+                        style={(() => {
+                          if (!square || isWinner) return undefined;
+                          const c = square.color || getColorForName(activeBoard.squares, square.name);
+                          return { backgroundColor: c.bg, borderColor: c.border };
+                        })()}
                         className={`aspect-square rounded sm:rounded-md text-[9px] sm:text-xs font-semibold transition-all overflow-hidden ${
                           isWinner
                             ? 'bg-gradient-to-br from-yellow-400 to-orange-500 text-black shadow-lg shadow-yellow-500/30'
                             : square
-                            ? 'bg-emerald-500/30 border border-emerald-400/60 text-emerald-50 hover:bg-emerald-500/40'
+                            ? 'border text-white hover:brightness-125'
                             : activeBoard.rowNumbers
                             ? 'bg-slate-800/40 border border-slate-700/40 text-slate-600 cursor-not-allowed'
                             : 'bg-slate-700/60 border border-slate-500/50 text-slate-400 hover:bg-cyan-500/30 hover:border-cyan-400/70 hover:text-white'
