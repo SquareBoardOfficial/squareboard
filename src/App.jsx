@@ -78,6 +78,9 @@ export default function SquareBoard() {
   const [pendingBoardId, setPendingBoardId] = useState(initialUrl.boardId);
   const [loaded, setLoaded] = useState(false);
 
+  // The currently signed-in user's ID. Used to tell owners from guests.
+  const [currentUserId, setCurrentUserId] = useState(null);
+
   // Form state for creating a board
   const [homeTeam, setHomeTeam] = useState('');
   const [awayTeam, setAwayTeam] = useState('');
@@ -107,45 +110,55 @@ export default function SquareBoard() {
   // Load boards from Supabase on mount
   useEffect(() => {
     async function loadBoards() {
-      const { data, error } = await supabase
-        .from('boards')
-        .select('*')
-        .order('created_at', { ascending: false });
+      // Find out who is signed in, so we only load THEIR boards
+      // and can tell owners apart from guests.
+      const { data: userData } = await supabase.auth.getUser();
+      const userId = userData?.user?.id || null;
+      setCurrentUserId(userId);
 
-      if (error) {
-        console.error('Failed to load boards from Supabase:', error);
-      } else {
-        // Convert database snake_case to camelCase for our React code
-        const camelBoards = (data || []).map(dbToBoard);
-        setBoards(camelBoards);
+      // Load only boards owned by the current user.
+      let camelBoards = [];
+      if (userId) {
+        const { data, error } = await supabase
+          .from('boards')
+          .select('*')
+          .eq('owner_id', userId)
+          .order('created_at', { ascending: false });
 
-        // If the URL pointed to a specific board, set it as active
-        if (pendingBoardId) {
-          let matching = camelBoards.find((b) => b.id === pendingBoardId);
+        if (error) {
+          console.error('Failed to load boards from Supabase:', error);
+        } else {
+          camelBoards = (data || []).map(dbToBoard);
+        }
+      }
+      setBoards(camelBoards);
 
-          // If the board isn't in our list (link from a friend, etc.),
-          // fetch it directly from Supabase.
-          if (!matching) {
-            const { data: oneBoard, error: oneErr } = await supabase
-              .from('boards')
-              .select('*')
-              .eq('id', pendingBoardId)
-              .single();
+      // If the URL pointed to a specific board, set it as active.
+      if (pendingBoardId) {
+        let matching = camelBoards.find((b) => b.id === pendingBoardId);
 
-            if (oneErr) {
-              console.error('Failed to load specific board:', oneErr);
-              setView('home');
-            } else if (oneBoard) {
-              matching = dbToBoard(oneBoard);
-              setBoards((current) => [matching, ...current]);
-            }
-          }
+        // If the board isn't in our list (link from a friend, etc.),
+        // fetch it directly from Supabase.
+        if (!matching) {
+          const { data: oneBoard, error: oneErr } = await supabase
+            .from('boards')
+            .select('*')
+            .eq('id', pendingBoardId)
+            .single();
 
-          if (matching) {
-            setActiveBoard(matching);
-          } else {
+          if (oneErr) {
+            console.error('Failed to load specific board:', oneErr);
             setView('home');
+          } else if (oneBoard) {
+            matching = dbToBoard(oneBoard);
+            setBoards((current) => [matching, ...current]);
           }
+        }
+
+        if (matching) {
+          setActiveBoard(matching);
+        } else {
+          setView('home');
         }
       }
       setLoaded(true);
@@ -237,6 +250,7 @@ export default function SquareBoard() {
       winners: row.winners || { q1: null, q2: null, q3: null, final: null },
       comments: row.comments || [],
       lockedEarly: row.locked_early,
+      ownerId: row.owner_id,
       createdAt: row.created_at,
     };
   }
@@ -248,6 +262,14 @@ export default function SquareBoard() {
 
   async function createBoard() {
     if (!homeTeam.trim() || !awayTeam.trim()) return;
+
+    // Find out who is signed in, so we can stamp the board with its owner.
+    const { data: userData } = await supabase.auth.getUser();
+    const userId = userData?.user?.id;
+    if (!userId) {
+      alert('You must be signed in to create a board.');
+      return;
+    }
 
     // Insert into Supabase. The database will generate the UUID and timestamps.
     const { data, error } = await supabase
@@ -263,6 +285,7 @@ export default function SquareBoard() {
         winners: { q1: null, q2: null, q3: null, final: null },
         comments: [],
         locked_early: false,
+        owner_id: userId,
       })
       .select()
       .single();
@@ -652,6 +675,9 @@ async function deleteBoard(id) {
     const filled = getFilledCount(activeBoard);
     const isFilled = filled === 100;
     const pot = getPotInfo(activeBoard);
+    // Is the signed-in user the owner of this board? Only the owner
+    // sees host-only controls (delete, draw numbers, enter/clear scores).
+    const isOwner = !!currentUserId && currentUserId === activeBoard.ownerId;
     const quarters = [
       { key: 'q1', label: 'Q1' },
       { key: 'q2', label: 'Q2' },
@@ -678,13 +704,15 @@ async function deleteBoard(id) {
                 <Copy size={14} />
                 {copied ? 'Copied!' : 'Copy link'}
               </button>
-              <button
-                onClick={() => deleteBoard(activeBoard.id)}
-                className="text-slate-500 hover:text-red-400 p-2"
-                title="Delete board"
-              >
-                <Trash2 size={16} />
-              </button>
+              {isOwner && (
+                <button
+                  onClick={() => deleteBoard(activeBoard.id)}
+                  className="text-slate-500 hover:text-red-400 p-2"
+                  title="Delete board"
+                >
+                  <Trash2 size={16} />
+                </button>
+              )}
             </div>
           </div>
 
@@ -724,7 +752,7 @@ async function deleteBoard(id) {
                 <p className="text-xs text-slate-400 mt-3">
                   Tap any square to claim it. Numbers are drawn automatically once all 100 are filled — or draw them early for a small pool.
                 </p>
-                {filled >= 1 && (
+                {isOwner && filled >= 1 && (
                   <button
                     onClick={() => setShowDrawConfirm(true)}
                     className="mt-3 w-full bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-500/40 text-cyan-200 font-semibold py-2.5 px-4 rounded-xl transition-all flex items-center justify-center gap-2"
@@ -788,20 +816,26 @@ async function deleteBoard(id) {
                               )}
                             </>
                           )}
-                          <button
-                            onClick={() => clearScore(q.key)}
-                            className="text-xs text-slate-500 hover:text-red-400 mt-1"
-                          >
-                            Clear
-                          </button>
+                          {isOwner && (
+                            <button
+                              onClick={() => clearScore(q.key)}
+                              className="text-xs text-slate-500 hover:text-red-400 mt-1"
+                            >
+                              Clear
+                            </button>
+                          )}
                         </>
                       ) : (
-                        <button
-                          onClick={() => setScoringQuarter(q.key)}
-                          className="text-xs text-cyan-400 hover:text-cyan-300 font-semibold"
-                        >
-                          + Enter score
-                        </button>
+                        isOwner ? (
+                          <button
+                            onClick={() => setScoringQuarter(q.key)}
+                            className="text-xs text-cyan-400 hover:text-cyan-300 font-semibold"
+                          >
+                            + Enter score
+                          </button>
+                        ) : (
+                          <div className="text-xs text-slate-600">Not yet entered</div>
+                        )
                       )}
                     </div>
                   );
