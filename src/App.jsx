@@ -241,7 +241,10 @@ export default function SquareBoard() {
     };
   }
 
-  
+  // Sign the current user out. main.jsx notices and shows the login screen.
+  async function handleSignOut() {
+    await supabase.auth.signOut();
+  }
 
   async function createBoard() {
     if (!homeTeam.trim() || !awayTeam.trim()) return;
@@ -487,6 +490,12 @@ async function deleteBoard(id) {
             </div>
             <h1 className="text-4xl font-black tracking-tight">SquareBoard</h1>
             <p className="text-slate-400 mt-2">Run your football squares pool, the easy way</p>
+            <button
+              onClick={handleSignOut}
+              className="mt-4 text-xs text-slate-400 hover:text-white underline underline-offset-2"
+            >
+              Sign out
+            </button>
           </div>
 
           <button
