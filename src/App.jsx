@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Plus, Trophy, Trash2, Shuffle, ChevronLeft, DollarSign, Calendar, Users, Check, MessageCircle, Send, Copy, Lock } from 'lucide-react';
+import { Plus, Trophy, Trash2, Shuffle, ChevronLeft, DollarSign, Calendar, Users, Check, MessageCircle, Send, Copy, Lock, Palette } from 'lucide-react';
 import { supabase } from './supabase';
 
 // Read the current URL and figure out which view to show.
@@ -58,6 +58,23 @@ const PLAYER_COLORS = [
   { bg: 'rgba(99, 102, 241, 0.35)', border: 'rgba(129, 140, 248, 0.7)' },  // indigo
 ];
 
+// Preset colors a paid host can pick for their team labels/numbers.
+// We store the chosen hex string in home_color / away_color. Null = default.
+const PRESET_COLORS = [
+  '#22d3ee', // cyan (the default home color)
+  '#fb923c', // orange (the default away color)
+  '#34d399', // emerald
+  '#f87171', // red
+  '#a78bfa', // purple
+  '#facc15', // yellow
+  '#f472b6', // pink
+  '#60a5fa', // blue
+];
+
+// Default label colors when a board has no custom colors set.
+const DEFAULT_HOME_COLOR = '#22d3ee'; // cyan
+const DEFAULT_AWAY_COLOR = '#fb923c'; // orange
+
 // Given a board's squares, work out which color a given name should use.
 // Names already on the board keep their color; a new name gets the next one.
 function getColorForName(squares, name) {
@@ -92,6 +109,12 @@ export default function SquareBoard() {
 
   // Controls the "you've reached the free limit" upgrade modal.
   const [showLimitModal, setShowLimitModal] = useState(false);
+
+  // Controls the board customization modal (paid owners only) and its draft fields.
+  const [showCustomize, setShowCustomize] = useState(false);
+  const [draftTitle, setDraftTitle] = useState('');
+  const [draftHomeColor, setDraftHomeColor] = useState(null);
+  const [draftAwayColor, setDraftAwayColor] = useState(null);
 
   // Form state for creating a board
   const [homeTeam, setHomeTeam] = useState('');
@@ -281,6 +304,9 @@ export default function SquareBoard() {
       lockedEarly: row.locked_early,
       ownerId: row.owner_id,
       createdAt: row.created_at,
+      customTitle: row.custom_title || null,
+      homeColor: row.home_color || null,
+      awayColor: row.away_color || null,
     };
   }
 
@@ -300,6 +326,31 @@ export default function SquareBoard() {
       return;
     }
     setView('create');
+  }
+
+  // Open the customize modal, seeding its draft fields from the active board.
+  function openCustomize() {
+    setDraftTitle(activeBoard.customTitle || '');
+    setDraftHomeColor(activeBoard.homeColor || null);
+    setDraftAwayColor(activeBoard.awayColor || null);
+    setShowCustomize(true);
+  }
+
+  // Save the customize modal's draft fields to the board.
+  function saveCustomize() {
+    updateActiveBoard({
+      customTitle: draftTitle.trim() ? draftTitle.trim() : null,
+      homeColor: draftHomeColor,
+      awayColor: draftAwayColor,
+    });
+    setShowCustomize(false);
+  }
+
+  // Reset customization back to defaults (clears all three).
+  function resetCustomize() {
+    setDraftTitle('');
+    setDraftHomeColor(null);
+    setDraftAwayColor(null);
   }
 
   // Sign the current user out. main.jsx notices and shows the login screen.
@@ -399,6 +450,9 @@ async function deleteBoard(id) {
     if ('winners' in updates) dbUpdates.winners = updates.winners;
     if ('comments' in updates) dbUpdates.comments = updates.comments;
     if ('lockedEarly' in updates) dbUpdates.locked_early = updates.lockedEarly;
+    if ('customTitle' in updates) dbUpdates.custom_title = updates.customTitle;
+    if ('homeColor' in updates) dbUpdates.home_color = updates.homeColor;
+    if ('awayColor' in updates) dbUpdates.away_color = updates.awayColor;
     dbUpdates.updated_at = new Date().toISOString();
 
     const { error } = await supabase
@@ -606,7 +660,7 @@ async function deleteBoard(id) {
                     <div className="flex items-start justify-between mb-2">
                       <div>
                         <div className="font-bold text-lg leading-tight">
-                          {board.awayTeam} <span className="text-slate-500">@</span> {board.homeTeam}
+                          {board.customTitle ? board.customTitle : (<>{board.awayTeam} <span className="text-slate-500">@</span> {board.homeTeam}</>)}
                         </div>
                         {board.gameDate && (
                           <div className="text-xs text-slate-400 mt-1 flex items-center gap-1">
@@ -766,6 +820,9 @@ async function deleteBoard(id) {
     // Is the signed-in user the owner of this board? Only the owner
     // sees host-only controls (delete, draw numbers, enter/clear scores).
     const isOwner = !!currentUserId && currentUserId === activeBoard.ownerId;
+    // The colors this board uses for home/away labels — custom if set, else default.
+    const homeColor = activeBoard.homeColor || DEFAULT_HOME_COLOR;
+    const awayColor = activeBoard.awayColor || DEFAULT_AWAY_COLOR;
     const quarters = [
       { key: 'q1', label: 'Q1' },
       { key: 'q2', label: 'Q2' },
@@ -784,6 +841,16 @@ async function deleteBoard(id) {
               <ChevronLeft size={18} /> Back
             </button>
             <div className="flex items-center gap-2">
+              {isOwner && isUnlocked && (
+                <button
+                  onClick={openCustomize}
+                  className="flex items-center gap-1 text-xs sm:text-sm text-emerald-400 hover:text-emerald-300 px-3 py-1.5 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 transition"
+                  title="Customize board"
+                >
+                  <Palette size={14} />
+                  Customize
+                </button>
+              )}
               <button
                 onClick={copyShareLink}
                 className="flex items-center gap-1 text-xs sm:text-sm text-cyan-400 hover:text-cyan-300 px-3 py-1.5 rounded-lg bg-cyan-500/10 hover:bg-cyan-500/20 border border-cyan-500/30 transition"
@@ -805,7 +872,12 @@ async function deleteBoard(id) {
           </div>
 
           <div className="text-center mb-6">
-            <h1 className="text-2xl sm:text-3xl font-black tracking-tight">
+            {activeBoard.customTitle && (
+              <h1 className="text-2xl sm:text-3xl font-black tracking-tight mb-1">{activeBoard.customTitle}</h1>
+            )}
+            <h1 className={activeBoard.customTitle
+              ? "text-base sm:text-lg font-semibold text-slate-300 tracking-tight"
+              : "text-2xl sm:text-3xl font-black tracking-tight"}>
               {activeBoard.awayTeam} <span className="text-slate-500 font-light">@</span> {activeBoard.homeTeam}
             </h1>
             {activeBoard.gameDate && (
@@ -947,7 +1019,7 @@ async function deleteBoard(id) {
           {/* The grid */}
           <div className="bg-white/5 border border-white/10 rounded-2xl p-3 sm:p-5 mb-6">
             {/* Top label - home team */}
-            <div className="text-center text-xs sm:text-sm uppercase tracking-wider text-cyan-400 font-bold mb-3">
+            <div className="text-center text-xs sm:text-sm uppercase tracking-wider font-bold mb-3" style={{ color: homeColor }}>
               {activeBoard.homeTeam} →
             </div>
 
@@ -959,18 +1031,18 @@ async function deleteBoard(id) {
               {/* Top-left empty corner */}
               <div></div>
 
-              {/* Column headers (cyan numbers) */}
+              {/* Column headers (home color numbers) */}
               {Array.from({ length: 10 }).map((_, i) => (
-                <div key={`col-${i}`} className="aspect-square flex items-center justify-center text-sm sm:text-base font-bold text-cyan-400">
+                <div key={`col-${i}`} className="aspect-square flex items-center justify-center text-sm sm:text-base font-bold" style={{ color: homeColor }}>
                   {activeBoard.colNumbers ? activeBoard.colNumbers[i] : '?'}
                 </div>
               ))}
 
-              {/* Rows: orange label + 10 squares each */}
+              {/* Rows: away-color label + 10 squares each */}
               {Array.from({ length: 10 }).map((_, row) => (
                 <React.Fragment key={`row-${row}`}>
-                  {/* Row label (orange number) */}
-                  <div className="flex items-center justify-center text-sm sm:text-base font-bold text-orange-400 w-7 sm:w-10 h-full">
+                  {/* Row label (away color number) */}
+                  <div className="flex items-center justify-center text-sm sm:text-base font-bold w-7 sm:w-10 h-full" style={{ color: awayColor }}>
                     {activeBoard.rowNumbers ? activeBoard.rowNumbers[row] : '?'}
                   </div>
 
@@ -1024,13 +1096,13 @@ async function deleteBoard(id) {
             </div>
 
             {/* Bottom label - away team */}
-            <div className="text-center text-xs sm:text-sm uppercase tracking-wider text-orange-400 font-bold mt-3">
+            <div className="text-center text-xs sm:text-sm uppercase tracking-wider font-bold mt-3" style={{ color: awayColor }}>
               ↑ {activeBoard.awayTeam}
             </div>
           </div>
 
           <div className="text-xs text-slate-500 text-center mb-4">
-            <span className="text-cyan-400">Cyan numbers</span> = {activeBoard.homeTeam} score digit · <span className="text-orange-400">Orange numbers</span> = {activeBoard.awayTeam} score digit
+            <span style={{ color: homeColor }}>{activeBoard.homeTeam} numbers</span> = {activeBoard.homeTeam} score digit · <span style={{ color: awayColor }}>{activeBoard.awayTeam} numbers</span> = {activeBoard.awayTeam} score digit
           </div>
 
           {/* Comments section */}
@@ -1184,7 +1256,7 @@ async function deleteBoard(id) {
               <p className="text-sm text-slate-400 mb-4">Enter the score at the end of this quarter.</p>
               <div className="grid grid-cols-2 gap-3 mb-4">
                 <div>
-                  <label className="block text-xs uppercase tracking-wider text-orange-400 font-bold mb-2">{activeBoard.awayTeam}</label>
+                  <label className="block text-xs uppercase tracking-wider font-bold mb-2" style={{ color: awayColor }}>{activeBoard.awayTeam}</label>
                   <input
                     type="number"
                     value={awayScore}
@@ -1196,7 +1268,7 @@ async function deleteBoard(id) {
                   />
                 </div>
                 <div>
-                  <label className="block text-xs uppercase tracking-wider text-cyan-400 font-bold mb-2">{activeBoard.homeTeam}</label>
+                  <label className="block text-xs uppercase tracking-wider font-bold mb-2" style={{ color: homeColor }}>{activeBoard.homeTeam}</label>
                   <input
                     type="number"
                     value={homeScore}
@@ -1249,6 +1321,68 @@ async function deleteBoard(id) {
                   className="flex-1 bg-gradient-to-r from-emerald-500 to-cyan-500 hover:from-emerald-400 hover:to-cyan-400 rounded-xl py-3 font-bold transition"
                 >
                   Draw & Lock
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Customize board modal (paid owners only) */}
+        {showCustomize && (
+          <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 z-50" onClick={() => setShowCustomize(false)}>
+            <div className="bg-slate-800 border border-white/10 rounded-2xl p-6 max-w-sm w-full" onClick={e => e.stopPropagation()}>
+              <div className="flex items-center gap-2 mb-4">
+                <Palette size={18} className="text-emerald-400" />
+                <h3 className="text-xl font-bold">Customize board</h3>
+              </div>
+
+              <label className="block text-xs uppercase tracking-wider text-slate-400 font-bold mb-2">Board title (optional)</label>
+              <input
+                type="text"
+                value={draftTitle}
+                onChange={e => setDraftTitle(e.target.value)}
+                placeholder="e.g. Mike's Super Bowl Bash"
+                className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-white placeholder-slate-500 focus:border-emerald-500 focus:outline-none transition mb-4"
+              />
+
+              <label className="block text-xs uppercase tracking-wider text-slate-400 font-bold mb-2">{activeBoard.homeTeam} (home) color</label>
+              <div className="flex flex-wrap gap-2 mb-4">
+                {PRESET_COLORS.map(c => (
+                  <button
+                    key={`home-${c}`}
+                    onClick={() => setDraftHomeColor(c)}
+                    className="w-8 h-8 rounded-full border-2 transition"
+                    style={{ backgroundColor: c, borderColor: draftHomeColor === c ? '#ffffff' : 'transparent' }}
+                    title={c}
+                  />
+                ))}
+              </div>
+
+              <label className="block text-xs uppercase tracking-wider text-slate-400 font-bold mb-2">{activeBoard.awayTeam} (away) color</label>
+              <div className="flex flex-wrap gap-2 mb-5">
+                {PRESET_COLORS.map(c => (
+                  <button
+                    key={`away-${c}`}
+                    onClick={() => setDraftAwayColor(c)}
+                    className="w-8 h-8 rounded-full border-2 transition"
+                    style={{ backgroundColor: c, borderColor: draftAwayColor === c ? '#ffffff' : 'transparent' }}
+                    title={c}
+                  />
+                ))}
+              </div>
+
+              <div className="flex gap-2">
+                <button
+                  onClick={resetCustomize}
+                  className="flex-1 bg-white/5 hover:bg-white/10 border border-white/10 rounded-xl py-3 font-semibold transition text-sm"
+                >
+                  Reset to default
+                </button>
+                <button
+                  onClick={saveCustomize}
+                  className="flex-1 bg-gradient-to-r from-emerald-500 to-cyan-500 hover:from-emerald-400 hover:to-cyan-400 rounded-xl py-3 font-bold transition"
+                >
+                  Save
                 </button>
               </div>
             </div>
