@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Plus, Trophy, Trash2, Shuffle, ChevronLeft, DollarSign, Calendar, Users, Check, MessageCircle, Send, Copy } from 'lucide-react';
+import { Plus, Trophy, Trash2, Shuffle, ChevronLeft, DollarSign, Calendar, Users, Check, MessageCircle, Send, Copy, Lock } from 'lucide-react';
 import { supabase } from './supabase';
 
 // Read the current URL and figure out which view to show.
@@ -89,6 +89,9 @@ export default function SquareBoard() {
   // Whether the current user has paid the $5 unlock. Read from their
   // profile row on load. Defaults to false (locked) until proven otherwise.
   const [isUnlocked, setIsUnlocked] = useState(false);
+
+  // Controls the "you've reached the free limit" upgrade modal.
+  const [showLimitModal, setShowLimitModal] = useState(false);
 
   // Form state for creating a board
   const [homeTeam, setHomeTeam] = useState('');
@@ -281,6 +284,24 @@ export default function SquareBoard() {
     };
   }
 
+  // Count the current user's ACTIVE boards. A board is "active" until its
+  // Final score has been entered — once the game's over, it no longer counts
+  // against the free-tier limit of one active board.
+  function countActiveBoards() {
+    return boards.filter((b) => !b.scores || !b.scores.final).length;
+  }
+
+  // Decide what happens when the user taps "Create New Board".
+  // Unlocked users always proceed. Free users are blocked once they
+  // already have one active board, and shown the upgrade modal instead.
+  function handleCreateClick() {
+    if (!isUnlocked && countActiveBoards() >= 1) {
+      setShowLimitModal(true);
+      return;
+    }
+    setView('create');
+  }
+
   // Sign the current user out. main.jsx notices and shows the login screen.
   async function handleSignOut() {
     await supabase.auth.signOut();
@@ -294,6 +315,14 @@ export default function SquareBoard() {
     const userId = userData?.user?.id;
     if (!userId) {
       alert('You must be signed in to create a board.');
+      return;
+    }
+
+    // Safety net: re-check the free-tier limit here too, in case a locked
+    // user reached this function some other way. Unlocked users skip it.
+    if (!isUnlocked && countActiveBoards() >= 1) {
+      setView('home');
+      setShowLimitModal(true);
       return;
     }
 
@@ -546,17 +575,11 @@ async function deleteBoard(id) {
               >
                 Sign out
               </button>
-              {/* TEMPORARY 4A-2 test badge — remove in 4B once real features use the flag */}
-              {isUnlocked && (
-                <span className="text-xs font-bold text-emerald-400 bg-emerald-500/10 border border-emerald-500/30 rounded-full px-2 py-0.5">
-                  Unlocked ✓
-                </span>
-              )}
             </div>
           </div>
 
           <button
-            onClick={() => setView('create')}
+            onClick={handleCreateClick}
             className="w-full bg-gradient-to-r from-emerald-500 to-cyan-500 hover:from-emerald-400 hover:to-cyan-400 text-white font-bold py-4 px-6 rounded-2xl shadow-lg shadow-emerald-500/20 flex items-center justify-center gap-2 transition-all hover:scale-[1.02] active:scale-[0.98] mb-8"
           >
             <Plus size={20} />
@@ -622,6 +645,37 @@ async function deleteBoard(id) {
             Boards sync live across devices. Money is handled offline between players.
           </div>
         </div>
+
+        {/* Free-tier limit / upgrade modal */}
+        {showLimitModal && (
+          <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 z-50" onClick={() => setShowLimitModal(false)}>
+            <div className="bg-slate-800 border border-white/10 rounded-2xl p-6 max-w-sm w-full" onClick={e => e.stopPropagation()}>
+              <div className="flex items-center gap-2 mb-3">
+                <div className="inline-flex items-center justify-center w-9 h-9 rounded-xl bg-emerald-500/15 border border-emerald-500/30">
+                  <Lock size={16} className="text-emerald-400" />
+                </div>
+                <h3 className="text-xl font-bold">Free limit reached</h3>
+              </div>
+              <p className="text-sm text-slate-300 mb-2">
+                You've reached the free limit of 1 active board.
+              </p>
+              <p className="text-sm text-slate-400 mb-5">
+                Unlock unlimited boards and customization for a one-time $5 — coming soon.
+              </p>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setShowLimitModal(false)}
+                  className="flex-1 bg-white/5 hover:bg-white/10 border border-white/10 rounded-xl py-3 font-semibold transition"
+                >
+                  Got it
+                </button>
+              </div>
+              <p className="text-xs text-slate-500 mt-3 text-center">
+                Tip: a board stops counting once you enter its Final score.
+              </p>
+            </div>
+          </div>
+        )}
       </div>
     );
   }
