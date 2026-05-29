@@ -15,6 +15,11 @@ function getViewFromUrl() {
   if (path === '/create') {
     return { view: 'create', boardId: null };
   }
+  if (path === '/reset-password') {
+    // Recovery flow handled by main.jsx — fall through to home if we ever
+    // land here as a normal signed-in user (e.g. they typed the URL).
+    return { view: 'home', boardId: null };
+  }
 
   const boardMatch = path.match(/^\/board\/([^/]+)/);
   if (boardMatch) {
