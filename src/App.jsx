@@ -86,6 +86,10 @@ export default function SquareBoard() {
   // The currently signed-in user's ID. Used to tell owners from guests.
   const [currentUserId, setCurrentUserId] = useState(null);
 
+  // Whether the current user has paid the $5 unlock. Read from their
+  // profile row on load. Defaults to false (locked) until proven otherwise.
+  const [isUnlocked, setIsUnlocked] = useState(false);
+
   // Form state for creating a board
   const [homeTeam, setHomeTeam] = useState('');
   const [awayTeam, setAwayTeam] = useState('');
@@ -120,6 +124,23 @@ export default function SquareBoard() {
       const { data: userData } = await supabase.auth.getUser();
       const userId = userData?.user?.id || null;
       setCurrentUserId(userId);
+
+      // Read this user's paid status from their profile row.
+      // If anything goes wrong, we leave isUnlocked as false (locked),
+      // which is the safe default.
+      if (userId) {
+        const { data: profile, error: profileErr } = await supabase
+          .from('profiles')
+          .select('is_unlocked')
+          .eq('id', userId)
+          .single();
+
+        if (profileErr) {
+          console.error('Failed to load profile:', profileErr);
+        } else if (profile) {
+          setIsUnlocked(profile.is_unlocked === true);
+        }
+      }
 
       // Load only boards owned by the current user.
       let camelBoards = [];
@@ -518,12 +539,20 @@ async function deleteBoard(id) {
             </div>
             <h1 className="text-4xl font-black tracking-tight">SquareBoard</h1>
             <p className="text-slate-400 mt-2">Run your football squares pool, the easy way</p>
-            <button
-              onClick={handleSignOut}
-              className="mt-4 text-xs text-slate-400 hover:text-white underline underline-offset-2"
-            >
-              Sign out
-            </button>
+            <div className="mt-4 flex items-center justify-center gap-3">
+              <button
+                onClick={handleSignOut}
+                className="text-xs text-slate-400 hover:text-white underline underline-offset-2"
+              >
+                Sign out
+              </button>
+              {/* TEMPORARY 4A-2 test badge — remove in 4B once real features use the flag */}
+              {isUnlocked && (
+                <span className="text-xs font-bold text-emerald-400 bg-emerald-500/10 border border-emerald-500/30 rounded-full px-2 py-0.5">
+                  Unlocked ✓
+                </span>
+              )}
+            </div>
           </div>
 
           <button
