@@ -75,6 +75,27 @@ const PRESET_COLORS = [
 const DEFAULT_HOME_COLOR = '#22d3ee'; // cyan
 const DEFAULT_AWAY_COLOR = '#fb923c'; // orange
 
+// Default payout split when a board has no custom split set.
+// Four equal quarters. Values are percentages that sum to 100.
+const DEFAULT_PAYOUTS = { q1: 25, q2: 25, q3: 25, final: 25 };
+
+// Given a board, return its effective payout split as percentages.
+// If the board has a custom split stored (all four columns present), use it;
+// otherwise fall back to four equal quarters.
+function getPayouts(board) {
+  const p = board.payouts;
+  if (
+    p &&
+    typeof p.q1 === 'number' &&
+    typeof p.q2 === 'number' &&
+    typeof p.q3 === 'number' &&
+    typeof p.final === 'number'
+  ) {
+    return p;
+  }
+  return DEFAULT_PAYOUTS;
+}
+
 // Given a board's squares, work out which color a given name should use.
 // Names already on the board keep their color; a new name gets the next one.
 function getColorForName(squares, name) {
@@ -115,6 +136,12 @@ export default function SquareBoard() {
   const [draftTitle, setDraftTitle] = useState('');
   const [draftHomeColor, setDraftHomeColor] = useState(null);
   const [draftAwayColor, setDraftAwayColor] = useState(null);
+  // Draft payout split fields, held as strings so the inputs can be edited
+  // freely (including temporarily-empty states) before we validate on save.
+  const [draftPayoutQ1, setDraftPayoutQ1] = useState('25');
+  const [draftPayoutQ2, setDraftPayoutQ2] = useState('25');
+  const [draftPayoutQ3, setDraftPayoutQ3] = useState('25');
+  const [draftPayoutFinal, setDraftPayoutFinal] = useState('25');
 
   // Form state for creating a board
   const [homeTeam, setHomeTeam] = useState('');
@@ -289,6 +316,23 @@ export default function SquareBoard() {
   // Convert a database row (snake_case) to a board object (camelCase)
   // that matches what the rest of our code expects.
   function dbToBoard(row) {
+    // Build the payouts object only when ALL four columns are present.
+    // A partially-filled or empty split falls back to equal quarters (null).
+    let payouts = null;
+    if (
+      row.payout_q1 != null &&
+      row.payout_q2 != null &&
+      row.payout_q3 != null &&
+      row.payout_q4 != null
+    ) {
+      payouts = {
+        q1: row.payout_q1,
+        q2: row.payout_q2,
+        q3: row.payout_q3,
+        final: row.payout_q4,
+      };
+    }
+
     return {
       id: row.id,
       homeTeam: row.home_team,
@@ -307,6 +351,7 @@ export default function SquareBoard() {
       customTitle: row.custom_title || null,
       homeColor: row.home_color || null,
       awayColor: row.away_color || null,
+      payouts,
     };
   }
 
@@ -333,24 +378,81 @@ export default function SquareBoard() {
     setDraftTitle(activeBoard.customTitle || '');
     setDraftHomeColor(activeBoard.homeColor || null);
     setDraftAwayColor(activeBoard.awayColor || null);
+    const p = getPayouts(activeBoard);
+    setDraftPayoutQ1(String(p.q1));
+    setDraftPayoutQ2(String(p.q2));
+    setDraftPayoutQ3(String(p.q3));
+    setDraftPayoutFinal(String(p.final));
     setShowCustomize(true);
+  }
+
+  // Parse the four draft payout strings into numbers (blank/invalid => NaN).
+  function parseDraftPayouts() {
+    return {
+      q1: parseInt(draftPayoutQ1, 10),
+      q2: parseInt(draftPayoutQ2, 10),
+      q3: parseInt(draftPayoutQ3, 10),
+      final: parseInt(draftPayoutFinal, 10),
+    };
+  }
+
+  // Sum of the current draft payout fields (NaN treated as 0 for display).
+  function draftPayoutSum() {
+    const p = parseDraftPayouts();
+    return (
+      (isNaN(p.q1) ? 0 : p.q1) +
+      (isNaN(p.q2) ? 0 : p.q2) +
+      (isNaN(p.q3) ? 0 : p.q3) +
+      (isNaN(p.final) ? 0 : p.final)
+    );
+  }
+
+  // Are the draft payouts valid? Each must be a whole number 0-100 and
+  // the four must sum to exactly 100.
+  function draftPayoutsValid() {
+    const p = parseDraftPayouts();
+    const vals = [p.q1, p.q2, p.q3, p.final];
+    if (vals.some((v) => isNaN(v) || v < 0 || v > 100)) return false;
+    return vals.reduce((a, b) => a + b, 0) === 100;
+  }
+
+  // Whether the draft split differs from an equal 25/25/25/25 split.
+  // Used to decide whether to store custom columns or clear them to null.
+  function draftPayoutsAreCustom() {
+    const p = parseDraftPayouts();
+    return !(p.q1 === 25 && p.q2 === 25 && p.q3 === 25 && p.final === 25);
   }
 
   // Save the customize modal's draft fields to the board.
   function saveCustomize() {
+    // Payouts should already be valid (Save is disabled otherwise), but guard anyway.
+    if (!draftPayoutsValid()) return;
+
+    const p = parseDraftPayouts();
+    // Store custom columns only when the split isn't the default equal one.
+    // Default splits are stored as null so the board cleanly falls back.
+    const payoutUpdates = draftPayoutsAreCustom()
+      ? { payoutQ1: p.q1, payoutQ2: p.q2, payoutQ3: p.q3, payoutFinal: p.final }
+      : { payoutQ1: null, payoutQ2: null, payoutQ3: null, payoutFinal: null };
+
     updateActiveBoard({
       customTitle: draftTitle.trim() ? draftTitle.trim() : null,
       homeColor: draftHomeColor,
       awayColor: draftAwayColor,
+      ...payoutUpdates,
     });
     setShowCustomize(false);
   }
 
-  // Reset customization back to defaults (clears all three).
+  // Reset customization back to defaults (clears title, colors, and split).
   function resetCustomize() {
     setDraftTitle('');
     setDraftHomeColor(null);
     setDraftAwayColor(null);
+    setDraftPayoutQ1('25');
+    setDraftPayoutQ2('25');
+    setDraftPayoutQ3('25');
+    setDraftPayoutFinal('25');
   }
 
   // Sign the current user out. main.jsx notices and shows the login screen.
@@ -435,6 +537,31 @@ async function deleteBoard(id) {
 
   async function updateActiveBoard(updates) {
     const updated = { ...activeBoard, ...updates };
+
+    // The four payout columns are stored flat on the DB row but grouped into
+    // a `payouts` object on the board. Keep the object in sync locally so the
+    // UI reflects the change immediately (before the realtime echo arrives).
+    if (
+      'payoutQ1' in updates ||
+      'payoutQ2' in updates ||
+      'payoutQ3' in updates ||
+      'payoutFinal' in updates
+    ) {
+      const allPresent =
+        updates.payoutQ1 != null &&
+        updates.payoutQ2 != null &&
+        updates.payoutQ3 != null &&
+        updates.payoutFinal != null;
+      updated.payouts = allPresent
+        ? {
+            q1: updates.payoutQ1,
+            q2: updates.payoutQ2,
+            q3: updates.payoutQ3,
+            final: updates.payoutFinal,
+          }
+        : null;
+    }
+
     setActiveBoard(updated);
     setBoards(boards.map(b => b.id === updated.id ? updated : b));
 
@@ -453,6 +580,10 @@ async function deleteBoard(id) {
     if ('customTitle' in updates) dbUpdates.custom_title = updates.customTitle;
     if ('homeColor' in updates) dbUpdates.home_color = updates.homeColor;
     if ('awayColor' in updates) dbUpdates.away_color = updates.awayColor;
+    if ('payoutQ1' in updates) dbUpdates.payout_q1 = updates.payoutQ1;
+    if ('payoutQ2' in updates) dbUpdates.payout_q2 = updates.payoutQ2;
+    if ('payoutQ3' in updates) dbUpdates.payout_q3 = updates.payoutQ3;
+    if ('payoutFinal' in updates) dbUpdates.payout_q4 = updates.payoutFinal;
     dbUpdates.updated_at = new Date().toISOString();
 
     const { error } = await supabase
@@ -593,17 +724,35 @@ async function deleteBoard(id) {
   function getPotInfo(board) {
     const filled = board.squares.filter(s => s !== null).length;
     const total = board.buyIn * filled;
-    const perQuarter = total / 4;
-    // Count unclaimed quarter wins to add to final
-    const unclaimedQuarters = ['q1', 'q2', 'q3'].filter(q => {
+
+    // Effective split as percentages (custom if set, else equal quarters).
+    const payouts = getPayouts(board);
+
+    // Each quarter's base dollar share from its percentage of the total pot.
+    const shares = {
+      q1: total * (payouts.q1 / 100),
+      q2: total * (payouts.q2 / 100),
+      q3: total * (payouts.q3 / 100),
+      final: total * (payouts.final / 100),
+    };
+
+    // Any of Q1-Q3 that was won by "Unclaimed" rolls its OWN share into Final.
+    let finalBonus = 0;
+    ['q1', 'q2', 'q3'].forEach(q => {
       const w = board.winners[q];
-      return w && w.name === 'Unclaimed';
-    }).length;
-    const finalBonus = unclaimedQuarters * perQuarter;
-    // If Final itself is unclaimed, all that money becomes orphaned
+      if (w && w.name === 'Unclaimed') {
+        finalBonus += shares[q];
+      }
+    });
+
+    // If Final itself is unclaimed, its share plus any rolled-in bonus is orphaned.
     const finalIsUnclaimed = board.winners.final && board.winners.final.name === 'Unclaimed';
-    const orphanedAmount = finalIsUnclaimed ? perQuarter + finalBonus : 0;
-    return { total, perQuarter, finalBonus, filled, orphanedAmount, finalIsUnclaimed };
+    const orphanedAmount = finalIsUnclaimed ? shares.final + finalBonus : 0;
+
+    // Backwards-compatible average (used only as a soft fallback for old callers).
+    const perQuarter = total / 4;
+
+    return { total, perQuarter, shares, payouts, finalBonus, filled, orphanedAmount, finalIsUnclaimed };
   }
 
   // ============== HOME VIEW ==============
@@ -823,6 +972,8 @@ async function deleteBoard(id) {
     // The colors this board uses for home/away labels — custom if set, else default.
     const homeColor = activeBoard.homeColor || DEFAULT_HOME_COLOR;
     const awayColor = activeBoard.awayColor || DEFAULT_AWAY_COLOR;
+    // Whether this board uses a non-equal custom split (drives a small hint in the UI).
+    const hasCustomSplit = !!activeBoard.payouts;
     const quarters = [
       { key: 'q1', label: 'Q1' },
       { key: 'q2', label: 'Q2' },
@@ -889,7 +1040,11 @@ async function deleteBoard(id) {
               <div className="inline-flex items-center gap-2 mt-3 px-3 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/30">
                 <DollarSign size={14} className="text-emerald-400" />
                 <span className="text-sm font-bold text-emerald-300">${pot.total.toFixed(2)} pot</span>
-                <span className="text-xs text-emerald-400/70">· ${pot.perQuarter.toFixed(2)}/qtr</span>
+                <span className="text-xs text-emerald-400/70">
+                  {hasCustomSplit
+                    ? `· ${pot.payouts.q1}/${pot.payouts.q2}/${pot.payouts.q3}/${pot.payouts.final} split`
+                    : `· $${pot.shares.final.toFixed(2)}/qtr`}
+                </span>
               </div>
             )}
           </div>
@@ -946,10 +1101,17 @@ async function deleteBoard(id) {
                   const score = activeBoard.scores[q.key];
                   const winner = activeBoard.winners[q.key];
                   const isUnclaimed = winner?.name === 'Unclaimed';
+                  // This quarter's own base share, plus (for Final) any rolled-in bonus.
+                  const baseShare = pot.shares[q.key];
                   const finalBonusForDisplay = q.key === 'final' ? pot.finalBonus : 0;
                   return (
                     <div key={q.key} className="bg-black/20 rounded-xl p-3">
-                      <div className="text-xs text-slate-400 font-bold mb-1">{q.label}</div>
+                      <div className="text-xs text-slate-400 font-bold mb-1 flex items-center justify-between">
+                        <span>{q.label}</span>
+                        {pot.total > 0 && (
+                          <span className="text-slate-500 font-semibold">{pot.payouts[q.key]}%</span>
+                        )}
+                      </div>
                       {score ? (
                         <>
                           <div className="text-sm font-bold">
@@ -968,9 +1130,9 @@ async function deleteBoard(id) {
                               <div className="text-xs text-emerald-400 mt-1 truncate" title={winner.name}>
                                 🏆 {winner.name}
                               </div>
-                              {pot.perQuarter > 0 && (
+                              {baseShare > 0 && (
                                 <div className="text-xs text-emerald-400/70">
-                                  ${(pot.perQuarter + finalBonusForDisplay).toFixed(2)}
+                                  ${(baseShare + finalBonusForDisplay).toFixed(2)}
                                   {finalBonusForDisplay > 0 && <span className="ml-1">(+bonus)</span>}
                                 </div>
                               )}
@@ -1328,9 +1490,18 @@ async function deleteBoard(id) {
         )}
 
         {/* Customize board modal (paid owners only) */}
-        {showCustomize && (
+        {showCustomize && (() => {
+          const sum = draftPayoutSum();
+          const valid = draftPayoutsValid();
+          const payoutFields = [
+            { label: 'Q1', value: draftPayoutQ1, set: setDraftPayoutQ1 },
+            { label: 'Q2', value: draftPayoutQ2, set: setDraftPayoutQ2 },
+            { label: 'Q3', value: draftPayoutQ3, set: setDraftPayoutQ3 },
+            { label: 'Final', value: draftPayoutFinal, set: setDraftPayoutFinal },
+          ];
+          return (
           <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 z-50" onClick={() => setShowCustomize(false)}>
-            <div className="bg-slate-800 border border-white/10 rounded-2xl p-6 max-w-sm w-full" onClick={e => e.stopPropagation()}>
+            <div className="bg-slate-800 border border-white/10 rounded-2xl p-6 max-w-sm w-full max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
               <div className="flex items-center gap-2 mb-4">
                 <Palette size={18} className="text-emerald-400" />
                 <h3 className="text-xl font-bold">Customize board</h3>
@@ -1371,6 +1542,33 @@ async function deleteBoard(id) {
                 ))}
               </div>
 
+              <div className="flex items-center justify-between mb-2">
+                <label className="block text-xs uppercase tracking-wider text-slate-400 font-bold">Payout split (%)</label>
+                <span className={`text-xs font-bold ${valid ? 'text-emerald-400' : 'text-amber-400'}`}>
+                  {sum}% {valid ? '✓' : '/ 100'}
+                </span>
+              </div>
+              <div className="grid grid-cols-4 gap-2 mb-2">
+                {payoutFields.map(f => (
+                  <div key={f.label}>
+                    <div className="text-[10px] text-slate-500 font-bold text-center mb-1">{f.label}</div>
+                    <input
+                      type="number"
+                      value={f.value}
+                      onChange={e => f.set(e.target.value)}
+                      min="0"
+                      max="100"
+                      className="w-full bg-white/5 border border-white/10 rounded-lg px-2 py-2 text-white text-center text-sm font-bold focus:border-emerald-500 focus:outline-none transition"
+                    />
+                  </div>
+                ))}
+              </div>
+              <p className={`text-xs mb-5 ${valid ? 'text-slate-500' : 'text-amber-400/90'}`}>
+                {valid
+                  ? 'The four quarters must add up to 100%.'
+                  : 'The four quarters must add up to exactly 100% to save.'}
+              </p>
+
               <div className="flex gap-2">
                 <button
                   onClick={resetCustomize}
@@ -1380,14 +1578,16 @@ async function deleteBoard(id) {
                 </button>
                 <button
                   onClick={saveCustomize}
-                  className="flex-1 bg-gradient-to-r from-emerald-500 to-cyan-500 hover:from-emerald-400 hover:to-cyan-400 rounded-xl py-3 font-bold transition"
+                  disabled={!valid}
+                  className="flex-1 bg-gradient-to-r from-emerald-500 to-cyan-500 hover:from-emerald-400 hover:to-cyan-400 disabled:opacity-30 disabled:cursor-not-allowed rounded-xl py-3 font-bold transition"
                 >
                   Save
                 </button>
               </div>
             </div>
           </div>
-        )}
+          );
+        })()}
       </div>
     );
   }
