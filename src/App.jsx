@@ -169,6 +169,110 @@ export default function SquareBoard() {
   const [commentText, setCommentText] = useState('');
   const [commentTeam, setCommentTeam] = useState('none'); // 'home', 'away', 'none'
 
+  // Shows a brief confirmation banner after returning from a successful payment.
+  const [showUnlockedToast, setShowUnlockedToast] = useState(false);
+  // Disables the upgrade button while we're creating the checkout session.
+  const [upgrading, setUpgrading] = useState(false);
+
+  // Re-read the signed-in user's is_unlocked flag from their profile.
+  // Returns true if unlocked. Used both on load and after returning from Stripe.
+  async function refreshUnlockStatus() {
+    const { data: userData } = await supabase.auth.getUser();
+    const userId = userData?.user?.id;
+    if (!userId) return false;
+    const { data: profile, error } = await supabase
+      .from('profiles')
+      .select('is_unlocked')
+      .eq('id', userId)
+      .single();
+    if (error) {
+      console.error('Failed to refresh unlock status:', error);
+      return false;
+    }
+    const unlocked = profile?.is_unlocked === true;
+    setIsUnlocked(unlocked);
+    return unlocked;
+  }
+
+  // Start the $5 unlock: create a Stripe Checkout Session on our serverless
+  // endpoint, then redirect the browser to Stripe's hosted checkout page.
+  async function handleUpgrade() {
+    if (upgrading) return;
+    setUpgrading(true);
+    try {
+      const { data: userData } = await supabase.auth.getUser();
+      const userId = userData?.user?.id;
+      const email = userData?.user?.email;
+      if (!userId) {
+        alert('Please sign in again before upgrading.');
+        setUpgrading(false);
+        return;
+      }
+
+      const res = await fetch('/api/create-checkout-session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId, email, origin: window.location.origin }),
+      });
+
+      if (!res.ok) {
+        throw new Error(`Checkout request failed (${res.status})`);
+      }
+      const { url } = await res.json();
+      if (!url) throw new Error('No checkout URL returned');
+
+      // Hand off to Stripe's hosted checkout.
+      window.location.href = url;
+    } catch (err) {
+      console.error('Upgrade failed:', err);
+      alert('Sorry, we could not start checkout. Please try again.');
+      setUpgrading(false);
+    }
+  }
+
+  // Handle the return from Stripe's hosted checkout.
+  // On success Stripe sends the user back to /?unlocked=1. The webhook flips
+  // is_unlocked server-side, but it may land a moment after this redirect, so
+  // we re-check the profile a few times before giving up. On cancel we just
+  // clean the URL. Either way we strip the query param so refreshes are clean.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const unlocked = params.get('unlocked');
+    const canceled = params.get('canceled');
+
+    function cleanUrl() {
+      const url = new URL(window.location.href);
+      url.searchParams.delete('unlocked');
+      url.searchParams.delete('canceled');
+      window.history.replaceState({}, '', url.pathname + url.search);
+    }
+
+    if (unlocked === '1') {
+      let attempts = 0;
+      const tryRefresh = async () => {
+        attempts += 1;
+        const ok = await refreshUnlockStatus();
+        if (ok) {
+          setShowUnlockedToast(true);
+          setShowLimitModal(false);
+          setTimeout(() => setShowUnlockedToast(false), 6000);
+          cleanUrl();
+        } else if (attempts < 5) {
+          // Webhook may not have landed yet — retry with a short backoff.
+          setTimeout(tryRefresh, 1500);
+        } else {
+          // Give up gracefully; the flag will be picked up on next load.
+          setShowUnlockedToast(true);
+          setTimeout(() => setShowUnlockedToast(false), 6000);
+          cleanUrl();
+        }
+      };
+      tryRefresh();
+    } else if (canceled === '1') {
+      cleanUrl();
+    }
+  }, []);
+
   // Load boards from Supabase on mount
   useEffect(() => {
     async function loadBoards() {
@@ -759,6 +863,12 @@ async function deleteBoard(id) {
   if (view === 'home') {
     return (
       <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-900 to-emerald-950 text-white p-4">
+        {showUnlockedToast && (
+          <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[60] bg-emerald-500 text-white font-bold px-5 py-3 rounded-xl shadow-lg shadow-emerald-500/30 flex items-center gap-2">
+            <Check size={18} />
+            You're unlocked! Enjoy unlimited boards & customization.
+          </div>
+        )}
         <div className="max-w-2xl mx-auto">
           <div className="text-center pt-8 pb-10">
             <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-gradient-to-br from-emerald-400 to-cyan-500 mb-4 shadow-lg shadow-emerald-500/30">
@@ -863,14 +973,21 @@ async function deleteBoard(id) {
                 You've reached the free limit of 1 active board.
               </p>
               <p className="text-sm text-slate-400 mb-5">
-                Unlock unlimited boards and customization for a one-time $5 — coming soon.
+                Unlock unlimited boards, custom themes, and custom payout splits with a one-time $5 payment.
               </p>
               <div className="flex gap-2">
                 <button
                   onClick={() => setShowLimitModal(false)}
                   className="flex-1 bg-white/5 hover:bg-white/10 border border-white/10 rounded-xl py-3 font-semibold transition"
                 >
-                  Got it
+                  Maybe later
+                </button>
+                <button
+                  onClick={handleUpgrade}
+                  disabled={upgrading}
+                  className="flex-1 bg-gradient-to-r from-emerald-500 to-cyan-500 hover:from-emerald-400 hover:to-cyan-400 disabled:opacity-40 disabled:cursor-not-allowed rounded-xl py-3 font-bold transition"
+                >
+                  {upgrading ? 'Starting…' : 'Upgrade for $5'}
                 </button>
               </div>
               <p className="text-xs text-slate-500 mt-3 text-center">
