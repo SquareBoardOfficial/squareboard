@@ -84,6 +84,14 @@ function isMissingColumnError(error) {
   return /column/i.test(error.message || '') && /(does not exist|could not find)/i.test(error.message || '');
 }
 
+// True when Supabase says a database function we called doesn't exist yet
+// (e.g. a migration hasn't been run on this database).
+function isMissingFunctionError(error) {
+  if (!error) return false;
+  if (error.code === 'PGRST202' || error.code === '42883') return true;
+  return /function/i.test(error.message || '') && /(does not exist|could not find)/i.test(error.message || '');
+}
+
 // Given a board's squares, work out which color a given name should use.
 // Names already on the board keep their color; a new name gets the next one.
 function getColorForName(squares, name) {
@@ -144,6 +152,9 @@ export default function SquareBoard() {
   // Confirmation modals
   const [showDrawConfirm, setShowDrawConfirm] = useState(false);
   const [copied, setCopied] = useState(false);
+
+  // Short message shown above the grid when a claim is turned down.
+  const [claimMessage, setClaimMessage] = useState('');
 
   // Comments state
   const [commentName, setCommentName] = useState(() => {
@@ -612,25 +623,119 @@ async function deleteBoard(id) {
     }
   }
 
-  function claimSquare(index) {
-    if (!claimName.trim()) return;
-    const newSquares = [...activeBoard.squares];
-    const trimmedClaimName = claimName.trim();
-    const claimColor = getColorForName(newSquares, trimmedClaimName);
-    newSquares[index] = { name: trimmedClaimName, color: claimColor };
+  // Put a fresh database row for a board into local state (list + active).
+  function applyBoardRow(row) {
+    if (!row) return;
+    const fresh = dbToBoard(row);
+    setBoards((current) => current.map((b) => (b.id === fresh.id ? fresh : b)));
+    setActiveBoard((current) => (current && current.id === fresh.id ? fresh : current));
+  }
 
-    const changes = { squares: newSquares };
-
-    // Auto-assign numbers if board just got filled
-    const filledCount = newSquares.filter(s => s !== null).length;
-    if (filledCount === 100 && !activeBoard.rowNumbers) {
-      changes.rowNumbers = shuffle([0,1,2,3,4,5,6,7,8,9]);
-      changes.colNumbers = shuffle([0,1,2,3,4,5,6,7,8,9]);
+  // Re-read one board from the database (used after a claim was turned down,
+  // so the grid shows who actually has the square).
+  async function reloadBoard(boardId) {
+    const { data, error } = await supabase
+      .from('boards')
+      .select('*')
+      .eq('id', boardId)
+      .single();
+    if (error) {
+      console.error('Failed to reload board:', error);
+      return;
     }
+    applyBoardRow(data);
+  }
 
-    updateActiveBoard(changes);
+  // Show a short message above the grid for a few seconds.
+  function flashClaimMessage(msg) {
+    setClaimMessage(msg);
+    setTimeout(() => setClaimMessage(''), 4000);
+  }
+
+  // Once every square is taken, draw the numbers. The .is('row_numbers', null)
+  // condition means only the first device to try actually draws, so two
+  // phones filling the last squares at once can't draw twice.
+  async function autoDrawIfFull(row) {
+    if (!row || row.row_numbers) return;
+    const filledCount = (row.squares || []).filter((sq) => sq !== null).length;
+    if (filledCount < 100) return;
+    const { data, error } = await supabase
+      .from('boards')
+      .update({
+        row_numbers: shuffle([0,1,2,3,4,5,6,7,8,9]),
+        col_numbers: shuffle([0,1,2,3,4,5,6,7,8,9]),
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', row.id)
+      .is('row_numbers', null)
+      .select();
+    if (error) {
+      console.error('Failed to draw numbers:', error);
+      return;
+    }
+    if (data && data[0]) applyBoardRow(data[0]);
+  }
+
+  // Claim one square. The database checks that the square is still empty and
+  // the numbers haven't been drawn, and only then writes this ONE square
+  // (see supabase/migrations/20261110010000_safe_square_claims.sql). That way
+  // two people tapping at the same time can't wipe out each other's squares.
+  async function claimSquare(index) {
+    if (!claimName.trim()) return;
+    const board = activeBoard;
+    const trimmedClaimName = claimName.trim();
+    const claimColor = getColorForName(board.squares, trimmedClaimName);
+
+    // Show the claim right away; the database answer below confirms or undoes it.
+    const optimistic = [...board.squares];
+    optimistic[index] = { name: trimmedClaimName, color: claimColor };
+    const optimisticBoard = { ...board, squares: optimistic };
+    setActiveBoard(optimisticBoard);
+    setBoards((current) => current.map((b) => (b.id === board.id ? optimisticBoard : b)));
     setClaimingIndex(null);
     setClaimName('');
+
+    const { data, error } = await supabase.rpc('claim_square', {
+      p_board_id: board.id,
+      p_index: index,
+      p_name: trimmedClaimName,
+      p_color: claimColor,
+    });
+
+    if (error && isMissingFunctionError(error)) {
+      // Migration not run yet: fall back to the old whole-board save so the
+      // app keeps working, and warn loudly.
+      console.warn(
+        'claim_square() is missing. Run supabase/migrations/20261110010000_safe_square_claims.sql ' +
+        'so simultaneous claims are safe.'
+      );
+      const changes = { squares: optimistic };
+      const filledCount = optimistic.filter((sq) => sq !== null).length;
+      if (filledCount === 100 && !board.rowNumbers) {
+        changes.rowNumbers = shuffle([0,1,2,3,4,5,6,7,8,9]);
+        changes.colNumbers = shuffle([0,1,2,3,4,5,6,7,8,9]);
+      }
+      updateActiveBoard(changes);
+      return;
+    }
+
+    if (error) {
+      console.error('Failed to claim square:', error);
+      flashClaimMessage("Sorry, that square didn't save. Please try again.");
+      reloadBoard(board.id);
+      return;
+    }
+
+    const row = Array.isArray(data) ? data[0] : data;
+    if (!row) {
+      // Someone else got there first (or numbers were just drawn).
+      flashClaimMessage('Someone just grabbed that square. Pick another one.');
+      reloadBoard(board.id);
+      return;
+    }
+
+    applyBoardRow(row);
+    autoDrawIfFull(row);
   }
 
   function drawNumbersEarly() {
@@ -642,10 +747,40 @@ async function deleteBoard(id) {
     setShowDrawConfirm(false);
   }
 
-  function unclaimSquare(index) {
-    const newSquares = [...activeBoard.squares];
-    newSquares[index] = null;
-    updateActiveBoard({ squares: newSquares });
+  // Remove a name from one square. Like claiming, the database only clears
+  // that one square, and only if it still holds the name that was confirmed.
+  async function unclaimSquare(index, expectedName) {
+    const board = activeBoard;
+    const { data, error } = await supabase.rpc('unclaim_square', {
+      p_board_id: board.id,
+      p_index: index,
+      p_expected_name: expectedName,
+    });
+
+    if (error && isMissingFunctionError(error)) {
+      console.warn(
+        'unclaim_square() is missing. Run supabase/migrations/20261110010000_safe_square_claims.sql.'
+      );
+      const newSquares = [...board.squares];
+      newSquares[index] = null;
+      updateActiveBoard({ squares: newSquares });
+      return;
+    }
+
+    if (error) {
+      console.error('Failed to remove square:', error);
+      flashClaimMessage("Sorry, that didn't save. Please try again.");
+      reloadBoard(board.id);
+      return;
+    }
+
+    const row = Array.isArray(data) ? data[0] : data;
+    if (!row) {
+      flashClaimMessage('That square changed before it could be cleared.');
+      reloadBoard(board.id);
+      return;
+    }
+    applyBoardRow(row);
   }
 
   async function copyShareLink() {
@@ -1145,6 +1280,12 @@ async function deleteBoard(id) {
             </div>
           )}
 
+          {claimMessage && (
+            <div className="mb-3 bg-amber-500/10 border border-amber-500/30 rounded-xl p-3 text-sm text-amber-300 text-center">
+              {claimMessage}
+            </div>
+          )}
+
           {/* The grid */}
           <div className="bg-white/5 border border-white/10 rounded-2xl p-3 sm:p-5 mb-6">
             {/* Top label - home team */}
@@ -1189,7 +1330,7 @@ async function deleteBoard(id) {
                           if (square) {
                             if (activeBoard.rowNumbers) return;
                             if (confirm(`Remove ${square.name} from this square?`)) {
-                              unclaimSquare(idx);
+                              unclaimSquare(idx, square.name);
                             }
                           } else {
                             setClaimingIndex(idx);
