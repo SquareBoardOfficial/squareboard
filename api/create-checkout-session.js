@@ -70,7 +70,7 @@ export default async function handler(req, res) {
             product_data: {
               name: 'SquareBoard Unlock',
               description:
-                'One-time unlock: unlimited active boards, custom themes, and custom payout splits.',
+                'One-time unlock: unlimited active boards and custom board themes.',
             },
             unit_amount: 500, // $5.00, in cents
           },
