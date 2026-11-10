@@ -1,7 +1,8 @@
 -- Safe square claims (Nov 2026)
 --
 -- Run once in the Supabase dashboard: SQL Editor > New query > paste > Run.
--- Adds two database functions. It does not change any tables or data.
+-- Adds two database functions and a column description. It does not change
+-- any data.
 --
 -- Why: the app used to save the WHOLE grid every time someone claimed a
 -- square. If two people tapped squares at the same moment, the second save
@@ -71,3 +72,8 @@ revoke execute on function public.claim_square(uuid, integer, text, jsonb) from 
 revoke execute on function public.unclaim_square(uuid, integer, text) from public, anon;
 grant execute on function public.claim_square(uuid, integer, text, jsonb) to authenticated;
 grant execute on function public.unclaim_square(uuid, integer, text) to authenticated;
+
+-- The checkbox on the New Board screen is now "I agree to the Terms of Use".
+-- The column keeps its original name; this note records what it means now.
+comment on column public.boards.no_wagering_certified_at is
+  'When the host agreed to the Terms of Use while creating this board (first version of the checkbox: no-wagering certification).';

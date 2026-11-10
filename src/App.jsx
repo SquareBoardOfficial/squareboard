@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Plus, Trophy, Trash2, Shuffle, ChevronLeft, Calendar, Users, Check, MessageCircle, Send, Copy, Lock, Palette, Flag } from 'lucide-react';
 import { supabase } from './supabase';
 import LegalLinks from './LegalLinks';
+import { TERMS_URL } from './legal';
 
 // Read the current URL and figure out which view to show.
 // "/" or "" => home
@@ -137,8 +138,8 @@ export default function SquareBoard() {
   const [homeTeam, setHomeTeam] = useState('');
   const [awayTeam, setAwayTeam] = useState('');
   const [gameDate, setGameDate] = useState('');
-  // Host must confirm the board is just for fun (no wagering) before creating it.
-  const [noWageringConfirmed, setNoWageringConfirmed] = useState(false);
+  // Host must agree to the Terms of Use before creating a board.
+  const [termsAccepted, setTermsAccepted] = useState(false);
 
   // Form state for claiming a square
   const [claimingIndex, setClaimingIndex] = useState(null);
@@ -492,8 +493,8 @@ export default function SquareBoard() {
 
   async function createBoard() {
     if (!homeTeam.trim() || !awayTeam.trim()) return;
-    // The host must certify the board involves no wagering.
-    if (!noWageringConfirmed) return;
+    // The host must agree to the Terms of Use.
+    if (!termsAccepted) return;
 
     // Find out who is signed in, so we can stamp the board with its owner.
     const { data: userData } = await supabase.auth.getUser();
@@ -526,8 +527,9 @@ export default function SquareBoard() {
       comments: [],
       locked_early: false,
       owner_id: userId,
-      // When the host ticked "no wagering". Column added by
-      // supabase/migrations/20261110000000_free_play.sql.
+      // When the host ticked "I agree to the Terms of Use" for this board.
+      // (Column added by 20261110000000_free_play.sql; the name is from the
+      // first version of the checkbox.)
       no_wagering_certified_at: new Date().toISOString(),
     };
 
@@ -543,7 +545,7 @@ export default function SquareBoard() {
     if (error && isMissingColumnError(error)) {
       console.warn(
         'boards.no_wagering_certified_at is missing. Run the free-play migration ' +
-        '(supabase/migrations/20261110000000_free_play.sql) so host certifications are saved.'
+        '(supabase/migrations/20261110000000_free_play.sql) so terms acceptance is saved.'
       );
       const rowWithoutCert = { ...newRow };
       delete rowWithoutCert.no_wagering_certified_at;
@@ -567,7 +569,7 @@ export default function SquareBoard() {
     setHomeTeam('');
     setAwayTeam('');
     setGameDate('');
-    setNoWageringConfirmed(false);
+    setTermsAccepted(false);
     setView('board');
   }
 
@@ -987,7 +989,7 @@ async function deleteBoard(id) {
           )}
 
           <div className="mt-12 text-center text-xs text-slate-600 pb-6">
-            Boards sync live across devices. SquareBoard is for entertainment only: no wagering, entry fees, or prizes.
+            Boards sync live across devices. SquareBoard is for entertainment.
             <LegalLinks className="mt-2" />
           </div>
         </div>
@@ -1084,18 +1086,27 @@ async function deleteBoard(id) {
             <label className="flex items-start gap-3 bg-white/5 border border-white/10 rounded-xl p-4 cursor-pointer">
               <input
                 type="checkbox"
-                checked={noWageringConfirmed}
-                onChange={e => setNoWageringConfirmed(e.target.checked)}
+                checked={termsAccepted}
+                onChange={e => setTermsAccepted(e.target.checked)}
                 className="mt-0.5 h-5 w-5 flex-shrink-0 accent-emerald-500"
               />
               <span className="text-sm text-slate-300">
-                I confirm this board is just for fun. No one is paying to play, betting, or winning money or prizes of value.
+                I agree to the{' '}
+                <a
+                  href={TERMS_URL}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={e => e.stopPropagation()}
+                  className="text-emerald-400 hover:text-emerald-300 underline underline-offset-2"
+                >
+                  Terms of Use
+                </a>
               </span>
             </label>
 
             <button
               onClick={createBoard}
-              disabled={!homeTeam.trim() || !awayTeam.trim() || !noWageringConfirmed}
+              disabled={!homeTeam.trim() || !awayTeam.trim() || !termsAccepted}
               className="w-full bg-gradient-to-r from-emerald-500 to-cyan-500 hover:from-emerald-400 hover:to-cyan-400 disabled:opacity-30 disabled:cursor-not-allowed text-white font-bold py-4 rounded-xl shadow-lg shadow-emerald-500/20 transition-all hover:scale-[1.02] active:scale-[0.98] mt-4"
             >
               Create Board
@@ -1178,7 +1189,6 @@ async function deleteBoard(id) {
                 {new Date(activeBoard.gameDate).toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}
               </p>
             )}
-            <p className="text-xs text-slate-500 mt-2">Just for fun. No wagering.</p>
           </div>
 
           {/* Status bar */}
@@ -1516,7 +1526,7 @@ async function deleteBoard(id) {
               ) : (
                 <>
                   <p className="text-sm text-slate-400 mb-4">
-                    SquareBoard is for fun only. Let us know if this board is being used for betting or anything else that doesn't belong here.
+                    Let us know if something on this board doesn't look right.
                   </p>
                   <label className="block text-xs uppercase tracking-wider text-slate-400 font-bold mb-2">What's wrong?</label>
                   <select
@@ -1524,7 +1534,7 @@ async function deleteBoard(id) {
                     onChange={e => setReportReason(e.target.value)}
                     className="w-full bg-slate-900 border border-white/10 rounded-xl px-3 py-3 text-sm text-white focus:border-emerald-500 focus:outline-none transition mb-3"
                   >
-                    <option value="gambling">Used for betting or money</option>
+                    <option value="gambling">Gambling or betting</option>
                     <option value="abusive">Abusive or offensive content</option>
                     <option value="other">Something else</option>
                   </select>

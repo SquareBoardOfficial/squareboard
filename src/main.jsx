@@ -4,6 +4,7 @@ import './index.css'
 import App from './App.jsx'
 import Auth from './Auth.jsx'
 import ResetPassword from './ResetPassword.jsx'
+import Terms from './Terms.jsx'
 import { supabase } from './supabase'
 
 // Root component: decides whether to show the login screen, the password
@@ -43,6 +44,9 @@ function Root() {
       </div>
     )
   }
+
+  // The Terms of Use page is public: show it whether or not anyone is signed in.
+  if (window.location.pathname === '/terms') return <Terms />
 
   // Recovery beats everything else: if the user arrived via a reset link,
   // show the password-reset screen even though they're technically signed in.
