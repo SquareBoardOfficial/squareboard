@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Plus, Trophy, Trash2, Shuffle, ChevronLeft, Calendar, Users, Check, MessageCircle, Send, Copy, Lock, Palette, Flag } from 'lucide-react';
 import { supabase } from './supabase';
 import LegalLinks from './LegalLinks';
+import { TERMS_URL } from './legal';
 
 // Read the current URL and figure out which view to show.
 // "/" or "" => home
@@ -84,6 +85,14 @@ function isMissingColumnError(error) {
   return /column/i.test(error.message || '') && /(does not exist|could not find)/i.test(error.message || '');
 }
 
+// True when Supabase says a database function we called doesn't exist yet
+// (e.g. a migration hasn't been run on this database).
+function isMissingFunctionError(error) {
+  if (!error) return false;
+  if (error.code === 'PGRST202' || error.code === '42883') return true;
+  return /function/i.test(error.message || '') && /(does not exist|could not find)/i.test(error.message || '');
+}
+
 // Given a board's squares, work out which color a given name should use.
 // Names already on the board keep their color; a new name gets the next one.
 function getColorForName(squares, name) {
@@ -129,8 +138,8 @@ export default function SquareBoard() {
   const [homeTeam, setHomeTeam] = useState('');
   const [awayTeam, setAwayTeam] = useState('');
   const [gameDate, setGameDate] = useState('');
-  // Host must confirm the board is just for fun (no wagering) before creating it.
-  const [noWageringConfirmed, setNoWageringConfirmed] = useState(false);
+  // Host must agree to the Terms of Use before creating a board.
+  const [termsAccepted, setTermsAccepted] = useState(false);
 
   // Form state for claiming a square
   const [claimingIndex, setClaimingIndex] = useState(null);
@@ -144,6 +153,9 @@ export default function SquareBoard() {
   // Confirmation modals
   const [showDrawConfirm, setShowDrawConfirm] = useState(false);
   const [copied, setCopied] = useState(false);
+
+  // Short message shown above the grid when a claim is turned down.
+  const [claimMessage, setClaimMessage] = useState('');
 
   // Comments state
   const [commentName, setCommentName] = useState(() => {
@@ -481,8 +493,8 @@ export default function SquareBoard() {
 
   async function createBoard() {
     if (!homeTeam.trim() || !awayTeam.trim()) return;
-    // The host must certify the board involves no wagering.
-    if (!noWageringConfirmed) return;
+    // The host must agree to the Terms of Use.
+    if (!termsAccepted) return;
 
     // Find out who is signed in, so we can stamp the board with its owner.
     const { data: userData } = await supabase.auth.getUser();
@@ -515,8 +527,9 @@ export default function SquareBoard() {
       comments: [],
       locked_early: false,
       owner_id: userId,
-      // When the host ticked "no wagering". Column added by
-      // supabase/migrations/20261110000000_free_play.sql.
+      // When the host ticked "I agree to the Terms of Use" for this board.
+      // (Column added by 20261110000000_free_play.sql; the name is from the
+      // first version of the checkbox.)
       no_wagering_certified_at: new Date().toISOString(),
     };
 
@@ -532,7 +545,7 @@ export default function SquareBoard() {
     if (error && isMissingColumnError(error)) {
       console.warn(
         'boards.no_wagering_certified_at is missing. Run the free-play migration ' +
-        '(supabase/migrations/20261110000000_free_play.sql) so host certifications are saved.'
+        '(supabase/migrations/20261110000000_free_play.sql) so terms acceptance is saved.'
       );
       const rowWithoutCert = { ...newRow };
       delete rowWithoutCert.no_wagering_certified_at;
@@ -556,7 +569,7 @@ export default function SquareBoard() {
     setHomeTeam('');
     setAwayTeam('');
     setGameDate('');
-    setNoWageringConfirmed(false);
+    setTermsAccepted(false);
     setView('board');
   }
 
@@ -612,25 +625,119 @@ async function deleteBoard(id) {
     }
   }
 
-  function claimSquare(index) {
-    if (!claimName.trim()) return;
-    const newSquares = [...activeBoard.squares];
-    const trimmedClaimName = claimName.trim();
-    const claimColor = getColorForName(newSquares, trimmedClaimName);
-    newSquares[index] = { name: trimmedClaimName, color: claimColor };
+  // Put a fresh database row for a board into local state (list + active).
+  function applyBoardRow(row) {
+    if (!row) return;
+    const fresh = dbToBoard(row);
+    setBoards((current) => current.map((b) => (b.id === fresh.id ? fresh : b)));
+    setActiveBoard((current) => (current && current.id === fresh.id ? fresh : current));
+  }
 
-    const changes = { squares: newSquares };
-
-    // Auto-assign numbers if board just got filled
-    const filledCount = newSquares.filter(s => s !== null).length;
-    if (filledCount === 100 && !activeBoard.rowNumbers) {
-      changes.rowNumbers = shuffle([0,1,2,3,4,5,6,7,8,9]);
-      changes.colNumbers = shuffle([0,1,2,3,4,5,6,7,8,9]);
+  // Re-read one board from the database (used after a claim was turned down,
+  // so the grid shows who actually has the square).
+  async function reloadBoard(boardId) {
+    const { data, error } = await supabase
+      .from('boards')
+      .select('*')
+      .eq('id', boardId)
+      .single();
+    if (error) {
+      console.error('Failed to reload board:', error);
+      return;
     }
+    applyBoardRow(data);
+  }
 
-    updateActiveBoard(changes);
+  // Show a short message above the grid for a few seconds.
+  function flashClaimMessage(msg) {
+    setClaimMessage(msg);
+    setTimeout(() => setClaimMessage(''), 4000);
+  }
+
+  // Once every square is taken, draw the numbers. The .is('row_numbers', null)
+  // condition means only the first device to try actually draws, so two
+  // phones filling the last squares at once can't draw twice.
+  async function autoDrawIfFull(row) {
+    if (!row || row.row_numbers) return;
+    const filledCount = (row.squares || []).filter((sq) => sq !== null).length;
+    if (filledCount < 100) return;
+    const { data, error } = await supabase
+      .from('boards')
+      .update({
+        row_numbers: shuffle([0,1,2,3,4,5,6,7,8,9]),
+        col_numbers: shuffle([0,1,2,3,4,5,6,7,8,9]),
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', row.id)
+      .is('row_numbers', null)
+      .select();
+    if (error) {
+      console.error('Failed to draw numbers:', error);
+      return;
+    }
+    if (data && data[0]) applyBoardRow(data[0]);
+  }
+
+  // Claim one square. The database checks that the square is still empty and
+  // the numbers haven't been drawn, and only then writes this ONE square
+  // (see supabase/migrations/20261110010000_safe_square_claims.sql). That way
+  // two people tapping at the same time can't wipe out each other's squares.
+  async function claimSquare(index) {
+    if (!claimName.trim()) return;
+    const board = activeBoard;
+    const trimmedClaimName = claimName.trim();
+    const claimColor = getColorForName(board.squares, trimmedClaimName);
+
+    // Show the claim right away; the database answer below confirms or undoes it.
+    const optimistic = [...board.squares];
+    optimistic[index] = { name: trimmedClaimName, color: claimColor };
+    const optimisticBoard = { ...board, squares: optimistic };
+    setActiveBoard(optimisticBoard);
+    setBoards((current) => current.map((b) => (b.id === board.id ? optimisticBoard : b)));
     setClaimingIndex(null);
     setClaimName('');
+
+    const { data, error } = await supabase.rpc('claim_square', {
+      p_board_id: board.id,
+      p_index: index,
+      p_name: trimmedClaimName,
+      p_color: claimColor,
+    });
+
+    if (error && isMissingFunctionError(error)) {
+      // Migration not run yet: fall back to the old whole-board save so the
+      // app keeps working, and warn loudly.
+      console.warn(
+        'claim_square() is missing. Run supabase/migrations/20261110010000_safe_square_claims.sql ' +
+        'so simultaneous claims are safe.'
+      );
+      const changes = { squares: optimistic };
+      const filledCount = optimistic.filter((sq) => sq !== null).length;
+      if (filledCount === 100 && !board.rowNumbers) {
+        changes.rowNumbers = shuffle([0,1,2,3,4,5,6,7,8,9]);
+        changes.colNumbers = shuffle([0,1,2,3,4,5,6,7,8,9]);
+      }
+      updateActiveBoard(changes);
+      return;
+    }
+
+    if (error) {
+      console.error('Failed to claim square:', error);
+      flashClaimMessage("Sorry, that square didn't save. Please try again.");
+      reloadBoard(board.id);
+      return;
+    }
+
+    const row = Array.isArray(data) ? data[0] : data;
+    if (!row) {
+      // Someone else got there first (or numbers were just drawn).
+      flashClaimMessage('Someone just grabbed that square. Pick another one.');
+      reloadBoard(board.id);
+      return;
+    }
+
+    applyBoardRow(row);
+    autoDrawIfFull(row);
   }
 
   function drawNumbersEarly() {
@@ -642,10 +749,40 @@ async function deleteBoard(id) {
     setShowDrawConfirm(false);
   }
 
-  function unclaimSquare(index) {
-    const newSquares = [...activeBoard.squares];
-    newSquares[index] = null;
-    updateActiveBoard({ squares: newSquares });
+  // Remove a name from one square. Like claiming, the database only clears
+  // that one square, and only if it still holds the name that was confirmed.
+  async function unclaimSquare(index, expectedName) {
+    const board = activeBoard;
+    const { data, error } = await supabase.rpc('unclaim_square', {
+      p_board_id: board.id,
+      p_index: index,
+      p_expected_name: expectedName,
+    });
+
+    if (error && isMissingFunctionError(error)) {
+      console.warn(
+        'unclaim_square() is missing. Run supabase/migrations/20261110010000_safe_square_claims.sql.'
+      );
+      const newSquares = [...board.squares];
+      newSquares[index] = null;
+      updateActiveBoard({ squares: newSquares });
+      return;
+    }
+
+    if (error) {
+      console.error('Failed to remove square:', error);
+      flashClaimMessage("Sorry, that didn't save. Please try again.");
+      reloadBoard(board.id);
+      return;
+    }
+
+    const row = Array.isArray(data) ? data[0] : data;
+    if (!row) {
+      flashClaimMessage('That square changed before it could be cleared.');
+      reloadBoard(board.id);
+      return;
+    }
+    applyBoardRow(row);
   }
 
   async function copyShareLink() {
@@ -852,7 +989,7 @@ async function deleteBoard(id) {
           )}
 
           <div className="mt-12 text-center text-xs text-slate-600 pb-6">
-            Boards sync live across devices. SquareBoard is for entertainment only: no wagering, entry fees, or prizes.
+            Boards sync live across devices. SquareBoard is for entertainment.
             <LegalLinks className="mt-2" />
           </div>
         </div>
@@ -949,18 +1086,27 @@ async function deleteBoard(id) {
             <label className="flex items-start gap-3 bg-white/5 border border-white/10 rounded-xl p-4 cursor-pointer">
               <input
                 type="checkbox"
-                checked={noWageringConfirmed}
-                onChange={e => setNoWageringConfirmed(e.target.checked)}
+                checked={termsAccepted}
+                onChange={e => setTermsAccepted(e.target.checked)}
                 className="mt-0.5 h-5 w-5 flex-shrink-0 accent-emerald-500"
               />
               <span className="text-sm text-slate-300">
-                I confirm this board is just for fun. No one is paying to play, betting, or winning money or prizes of value.
+                I agree to the{' '}
+                <a
+                  href={TERMS_URL}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={e => e.stopPropagation()}
+                  className="text-emerald-400 hover:text-emerald-300 underline underline-offset-2"
+                >
+                  Terms of Use
+                </a>
               </span>
             </label>
 
             <button
               onClick={createBoard}
-              disabled={!homeTeam.trim() || !awayTeam.trim() || !noWageringConfirmed}
+              disabled={!homeTeam.trim() || !awayTeam.trim() || !termsAccepted}
               className="w-full bg-gradient-to-r from-emerald-500 to-cyan-500 hover:from-emerald-400 hover:to-cyan-400 disabled:opacity-30 disabled:cursor-not-allowed text-white font-bold py-4 rounded-xl shadow-lg shadow-emerald-500/20 transition-all hover:scale-[1.02] active:scale-[0.98] mt-4"
             >
               Create Board
@@ -1043,7 +1189,6 @@ async function deleteBoard(id) {
                 {new Date(activeBoard.gameDate).toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}
               </p>
             )}
-            <p className="text-xs text-slate-500 mt-2">Just for fun. No wagering.</p>
           </div>
 
           {/* Status bar */}
@@ -1145,6 +1290,12 @@ async function deleteBoard(id) {
             </div>
           )}
 
+          {claimMessage && (
+            <div className="mb-3 bg-amber-500/10 border border-amber-500/30 rounded-xl p-3 text-sm text-amber-300 text-center">
+              {claimMessage}
+            </div>
+          )}
+
           {/* The grid */}
           <div className="bg-white/5 border border-white/10 rounded-2xl p-3 sm:p-5 mb-6">
             {/* Top label - home team */}
@@ -1189,7 +1340,7 @@ async function deleteBoard(id) {
                           if (square) {
                             if (activeBoard.rowNumbers) return;
                             if (confirm(`Remove ${square.name} from this square?`)) {
-                              unclaimSquare(idx);
+                              unclaimSquare(idx, square.name);
                             }
                           } else {
                             setClaimingIndex(idx);
@@ -1375,7 +1526,7 @@ async function deleteBoard(id) {
               ) : (
                 <>
                   <p className="text-sm text-slate-400 mb-4">
-                    SquareBoard is for fun only. Let us know if this board is being used for betting or anything else that doesn't belong here.
+                    Let us know if something on this board doesn't look right.
                   </p>
                   <label className="block text-xs uppercase tracking-wider text-slate-400 font-bold mb-2">What's wrong?</label>
                   <select
@@ -1383,7 +1534,7 @@ async function deleteBoard(id) {
                     onChange={e => setReportReason(e.target.value)}
                     className="w-full bg-slate-900 border border-white/10 rounded-xl px-3 py-3 text-sm text-white focus:border-emerald-500 focus:outline-none transition mb-3"
                   >
-                    <option value="gambling">Used for betting or money</option>
+                    <option value="gambling">Gambling or betting</option>
                     <option value="abusive">Abusive or offensive content</option>
                     <option value="other">Something else</option>
                   </select>

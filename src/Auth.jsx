@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { supabase } from './supabase';
-import LegalLinks, { HAS_TERMS } from './LegalLinks';
+import LegalLinks from './LegalLinks';
+import { TERMS_URL } from './legal';
 
 // A simple login / signup / forgot-password screen.
 // Shown by main.jsx whenever nobody is signed in.
@@ -217,11 +218,16 @@ export default function Auth() {
             )}
           </div>
 
-          <p className="text-center text-xs text-slate-500">
-            SquareBoard is for entertainment only. No wagering, entry fees, or prizes.
-            {mode === 'signup' && HAS_TERMS && ' By creating an account you agree to the Terms.'}
-          </p>
-          <LegalLinks />
+          {mode === 'signup' ? (
+            <p className="text-center text-xs text-slate-500">
+              By creating an account you agree to the{' '}
+              <a href={TERMS_URL} target="_blank" rel="noopener noreferrer" className="underline underline-offset-2 hover:text-slate-300">
+                Terms of Use
+              </a>.
+            </p>
+          ) : (
+            <LegalLinks />
+          )}
         </div>
       </div>
     </div>
