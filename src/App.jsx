@@ -8,6 +8,7 @@ import { TERMS_URL } from './legal';
 // "/" or "" => home
 // "/create" => create
 // "/board/<id>" => board with that id
+// "/b/<code>" => board with that short share code
 function getViewFromUrl() {
   const path = window.location.pathname;
 
@@ -28,19 +29,42 @@ function getViewFromUrl() {
     return { view: 'board', boardId: boardMatch[1] };
   }
 
+  const shortMatch = path.match(/^\/b\/([A-Za-z0-9]+)\/?$/);
+  if (shortMatch) {
+    return { view: 'board', boardId: null, shortCode: shortMatch[1].toLowerCase() };
+  }
+
   // Unknown path — fall back to home
   return { view: 'home', boardId: null };
 }
 
+// The short path for a board when it has a share code, else the long one.
+function boardPath(board) {
+  return board.shortCode ? `/b/${board.shortCode}` : `/board/${board.id}`;
+}
+
 // Push a new URL into the browser's history.
-// Pass the view name and (for board view) the board ID.
-function pushUrl(view, boardId) {
+// Pass the view name and (for board view) the board.
+function pushUrl(view, board) {
+  // Board view but the board hasn't loaded yet: leave the address alone so a
+  // shared link isn't swapped for "/" while it loads.
+  if (view === 'board' && !board) return;
+
   let path = '/';
   if (view === 'create') path = '/create';
-  else if (view === 'board' && boardId) path = `/board/${boardId}`;
+  else if (view === 'board' && board) path = boardPath(board);
 
-  // Only push if the URL is actually different to avoid spamming history.
-  if (window.location.pathname !== path) {
+  if (window.location.pathname === path) return;
+
+  // Already looking at this same board under its other address (long id vs
+  // short code)? Swap the address in place instead of adding a history step.
+  const current = getViewFromUrl();
+  const sameBoard =
+    view === 'board' && board && current.view === 'board' &&
+    (current.boardId === board.id || (current.shortCode && current.shortCode === board.shortCode));
+  if (sameBoard) {
+    window.history.replaceState({}, '', path);
+  } else {
     window.history.pushState({}, '', path);
   }
 }
@@ -116,6 +140,7 @@ export default function SquareBoard() {
   const initialUrl = getViewFromUrl();
   const [view, setView] = useState(initialUrl.view); // home, create, board
   const [pendingBoardId, setPendingBoardId] = useState(initialUrl.boardId);
+  const [pendingShortCode] = useState(initialUrl.shortCode || null);
   const [loaded, setLoaded] = useState(false);
 
   // The currently signed-in user's ID. Used to tell owners from guests.
@@ -318,8 +343,10 @@ export default function SquareBoard() {
       setBoards(camelBoards);
 
       // If the URL pointed to a specific board, set it as active.
-      if (pendingBoardId) {
-        let matching = camelBoards.find((b) => b.id === pendingBoardId);
+      if (pendingBoardId || pendingShortCode) {
+        let matching = camelBoards.find((b) =>
+          pendingBoardId ? b.id === pendingBoardId : b.shortCode === pendingShortCode
+        );
 
         // If the board isn't in our list (link from a friend, etc.),
         // fetch it directly from Supabase.
@@ -327,7 +354,7 @@ export default function SquareBoard() {
           const { data: oneBoard, error: oneErr } = await supabase
             .from('boards')
             .select('*')
-            .eq('id', pendingBoardId)
+            .eq(pendingBoardId ? 'id' : 'short_code', pendingBoardId || pendingShortCode)
             .single();
 
           if (oneErr) {
@@ -394,7 +421,7 @@ export default function SquareBoard() {
 
   // Keep the URL in sync with the current view.
   useEffect(() => {
-    pushUrl(view, activeBoard?.id);
+    pushUrl(view, activeBoard);
   }, [view, activeBoard]);
 
   // Listen for browser Back/Forward button presses
@@ -403,9 +430,11 @@ export default function SquareBoard() {
     function handlePopState() {
       const next = getViewFromUrl();
       setView(next.view);
-      if (next.view === 'board' && next.boardId) {
+      if (next.view === 'board' && (next.boardId || next.shortCode)) {
         setBoards((current) => {
-          const found = current.find((b) => b.id === next.boardId);
+          const found = current.find((b) =>
+            next.boardId ? b.id === next.boardId : b.shortCode === next.shortCode
+          );
           if (found) setActiveBoard(found);
           return current;
         });
@@ -440,6 +469,9 @@ export default function SquareBoard() {
       customTitle: row.custom_title || null,
       homeColor: row.home_color || null,
       awayColor: row.away_color || null,
+      // Short share code (e.g. "k7m2qx" for squareboardapp.com/b/k7m2qx).
+      // Set by the database; null until the share-links migration is run.
+      shortCode: row.short_code || null,
     };
   }
 
@@ -533,9 +565,10 @@ export default function SquareBoard() {
       no_wagering_certified_at: new Date().toISOString(),
     };
 
+    let rowToInsert = newRow;
     let { data, error } = await supabase
       .from('boards')
-      .insert(newRow)
+      .insert(rowToInsert)
       .select()
       .single();
 
@@ -547,11 +580,21 @@ export default function SquareBoard() {
         'boards.no_wagering_certified_at is missing. Run the free-play migration ' +
         '(supabase/migrations/20261110000000_free_play.sql) so terms acceptance is saved.'
       );
-      const rowWithoutCert = { ...newRow };
-      delete rowWithoutCert.no_wagering_certified_at;
+      rowToInsert = { ...newRow };
+      delete rowToInsert.no_wagering_certified_at;
       ({ data, error } = await supabase
         .from('boards')
-        .insert(rowWithoutCert)
+        .insert(rowToInsert)
+        .select()
+        .single());
+    }
+
+    // The database picks a random short share code for each new board. In the
+    // very rare case it picks one that's already used, just try again.
+    if (error && error.code === '23505' && /short_code/i.test(`${error.message} ${error.details}`)) {
+      ({ data, error } = await supabase
+        .from('boards')
+        .insert(rowToInsert)
         .select()
         .single());
     }
@@ -786,7 +829,10 @@ async function deleteBoard(id) {
   }
 
   async function copyShareLink() {
-    const url = window.location.href;
+    // Prefer the short link (yoursite.com/b/k7m2qx); fall back to the long one.
+    const url = activeBoard?.shortCode
+      ? `${window.location.origin}/b/${activeBoard.shortCode}`
+      : window.location.href;
     try {
       await navigator.clipboard.writeText(url);
       setCopied(true);
